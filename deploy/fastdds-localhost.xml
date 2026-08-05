@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast DDS profile: pin all discovery and traffic to IPv4 loopback.
+
+  Why this is needed on WSL2 (and any host whose hostname resolves to IPv6
+  only): Fast DDS resolves the machine hostname to build its locator list. On
+  WSL2 `getent hosts $(hostname)` returns only fe80::/2402: addresses and no
+  IPv4, so participants advertise locators nobody can reach over the IPv4
+  transport. Multicast works, shared memory works, yet two processes on the
+  same machine never match -- `ros2 topic list` returns nothing and the web
+  node sees no telemetry from the PTZ node.
+
+  Pinning to 127.0.0.1 sidesteps hostname resolution entirely. All three
+  flir_ptz nodes run on one host, so loopback-only is exactly right; it also
+  keeps ROS traffic off the camera and uplink networks.
+
+  Usage:
+      export FASTDDS_DEFAULT_PROFILES_FILE=$PWD/deploy/fastdds-localhost.xml
+      export FASTRTPS_DEFAULT_PROFILES_FILE=$FASTDDS_DEFAULT_PROFILES_FILE
+
+  If you later split nodes across machines, stop using this file and fix
+  hostname resolution instead (add an IPv4 entry for the hostname to
+  /etc/hosts).
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_loopback</transport_id>
+        <type>UDPv4</type>
+        <interfaceWhiteList>
+          <address>127.0.0.1</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="loopback_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_loopback</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <builtin>
+          <metatrafficUnicastLocatorList>
+            <locator><udpv4><address>127.0.0.1</address></udpv4></locator>
+          </metatrafficUnicastLocatorList>
+          <initialPeersList>
+            <locator><udpv4><address>127.0.0.1</address></udpv4></locator>
+          </initialPeersList>
+        </builtin>
+        <defaultUnicastLocatorList>
+          <locator><udpv4><address>127.0.0.1</address></udpv4></locator>
+        </defaultUnicastLocatorList>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

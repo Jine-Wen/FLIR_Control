@@ -11,6 +11,13 @@
 #   bash deploy/startup_flir_ptz.sh [stop]
 #   bash deploy/startup_flir_ptz.sh <CAMERA_IP> [MODEL] [AUTH_USER] [AUTH_PASS]
 #
+# Flags:
+#   --video-only       Only download and start mediamtx. Skips nginx, Basic
+#                      Auth and every sudo step. This is all you need for the
+#                      dashboard's WebRTC video; nginx is only for exposing
+#                      the dashboard outside the machine.
+#   --install-sudoers  Grant passwordless sudo for the nginx/htpasswd steps.
+#
 #   CAMERA_IP  : Camera IP address (required, no default)
 #   MODEL      : 364c (default) or m232
 #   AUTH_USER  : nginx Basic Auth username (default: flir)
@@ -22,16 +29,26 @@
 
 set -e
 
+# Running this with `source`/`.` would make every `exit` below kill the calling
+# shell. Detect it and bail out politely instead.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    echo "Run this script, do not source it:" >&2
+    echo "    bash deploy/startup_flir_ptz.sh <CAMERA_IP> [MODEL]" >&2
+    return 1
+fi
+
 # ── Parameters ───────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # ── Flags (must be parsed before positional arguments) ───────────────────────
 INSTALL_SUDOERS=0
+VIDEO_ONLY=0
 _args=()
 for _a in "$@"; do
     case "$_a" in
         --install-sudoers) INSTALL_SUDOERS=1 ;;
+        --video-only)      VIDEO_ONLY=1 ;;
         *)                 _args+=("$_a") ;;
     esac
 done
@@ -87,7 +104,10 @@ echo -e "${BOLD}  FLIR PTZ Startup Script${NC}"
 echo -e "${BOLD}════════════════════════════════════════${NC}"
 
 # ── Interactive credential prompt (only when htpasswd is not yet created) ────
-if [ ! -f "$HTPASSWD" ]; then
+# --video-only never touches nginx, so it must never ask for its password.
+if [ "$VIDEO_ONLY" = "1" ]; then
+    AUTH_USER="(skipped)"
+elif [ ! -f "$HTPASSWD" ]; then
     # First-time setup: prompt for credentials
     if [ -z "$AUTH_USER" ]; then
         read -rp "  Enter web login username [default: flir]: " AUTH_USER
@@ -106,13 +126,20 @@ fi
 
 echo "  Camera IP  : $CAMERA_IP"
 echo "  Model      : $MODEL"
-echo "  Auth User  : $AUTH_USER"
-echo "  Nginx Port : $NGINX_PORT"
+if [ "$VIDEO_ONLY" = "1" ]; then
+    echo "  Mode       : video only (mediamtx; no nginx, no sudo)"
+else
+    echo "  Auth User  : $AUTH_USER"
+    echo "  Nginx Port : $NGINX_PORT"
+fi
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1: Install dependencies
 # ─────────────────────────────────────────────────────────────────────────────
+if [ "$VIDEO_ONLY" = "1" ]; then
+    log "Steps 1-2/4 — skipped (--video-only)"
+else
 log "Step 1/4 — Checking dependencies"
 
 PKGS_NEEDED=()
@@ -194,6 +221,8 @@ else
     err "Nginx config error, please check $NGINX_CONF_DST"
 fi
 
+fi   # end of the nginx/Basic-Auth block skipped by --video-only
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3: Download mediamtx
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,15 +276,25 @@ fi
 HOST_IP=$(hostname -I | awk '{print $1}')
 
 echo ""
-echo -e "${BOLD}  ┌─────────────────────────────────────────┐${NC}"
-echo -e "${BOLD}  │  Service URLs                           │${NC}"
-echo -e "${BOLD}  ├─────────────────────────────────────────┤${NC}"
-echo -e "${BOLD}  │  Web (nginx)  http://${HOST_IP}:${NGINX_PORT}/  │${NC}"
-echo -e "${BOLD}  │  WebRTC IR    http://${HOST_IP}:8889/ir  │${NC}"
-[ "$MODEL" != "m232" ] && \
-echo -e "${BOLD}  │  WebRTC EO    http://${HOST_IP}:8889/eo  │${NC}"
-echo -e "${BOLD}  │  Auth user    ${AUTH_USER}                       │${NC}"
-echo -e "${BOLD}  └─────────────────────────────────────────┘${NC}"
+echo ""
+if [ "$VIDEO_ONLY" = "1" ]; then
+    echo -e "${BOLD}  Video endpoints (browser connects to these directly):${NC}"
+    echo    "    WebRTC IR   http://${HOST_IP}:8889/ir"
+    [ "$MODEL" != "m232" ] && \
+    echo    "    WebRTC EO   http://${HOST_IP}:8889/eo"
+    echo    "    mediamtx API http://127.0.0.1:9997/v3/paths/list"
+    echo ""
+    echo -e "${YELLOW}    Streams are pulled on demand: they read 'ready=false'${NC}"
+    echo -e "${YELLOW}    until a viewer actually opens them. That is normal.${NC}"
+else
+    echo -e "${BOLD}  Service URLs:${NC}"
+    echo    "    Dashboard (nginx)  http://${HOST_IP}:${NGINX_PORT}/"
+    echo    "    Dashboard (direct) http://${HOST_IP}:8080/"
+    echo    "    WebRTC IR          http://${HOST_IP}:8889/ir"
+    [ "$MODEL" != "m232" ] && \
+    echo    "    WebRTC EO          http://${HOST_IP}:8889/eo"
+    echo    "    Auth user          ${AUTH_USER}"
+fi
 echo ""
 
 ok "Starting mediamtx in background..."

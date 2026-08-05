@@ -142,6 +142,43 @@ git check-ignore -v flir_ptz/config/camera.local.yaml
 
 ---
 
+## Middleware: check this first if the dashboard "cannot connect"
+
+The three nodes talk over ordinary ROS topics and services. On some hosts —
+**WSL2 in particular** — the default Fast DDS middleware fails to discover
+participants *across processes*, even though multicast, shared memory and
+hostname resolution all test fine and pub/sub inside a single process works.
+`ros2 node list` reports nothing at all.
+
+The symptom in this project is misleading: the dashboard loads and its own HTTP
+endpoints answer normally, but the setup page reports
+
+> Connection timed out. Check camera IP/credentials and try again.
+
+with a perfectly good camera IP and password, and never auto-redirects to
+`/control` even though the PTZ node is connected. Nothing is wrong with the
+credentials — the web node simply never receives the PTZ node's
+`camera_status` message.
+
+Check it in 30 seconds:
+
+```bash
+ros2 run demo_nodes_cpp talker &
+ros2 topic echo /chatter --once
+```
+
+If no message arrives, switch to Zenoh:
+
+```bash
+sudo apt install ros-$ROS_DISTRO-rmw-zenoh-cpp   # if needed
+source deploy/ros_env.sh                         # sets RMW + starts the router
+```
+
+Source it in **every** terminal that touches the ROS graph — a `ros2 topic
+echo` or `joy_node` started without it will silently see an empty graph.
+
+---
+
 ## Launch
 
 ```bash
@@ -334,9 +371,29 @@ node over localhost HTTP twice a second.)
 ## Deployment
 
 ```bash
+# Video only — starts mediamtx, no nginx, no sudo. This is all you need for
+# the dashboard's WebRTC video.
+bash deploy/startup_flir_ptz.sh --video-only <CAMERA_IP> [364c|m232]
+
+# Full: also installs and configures nginx + Basic Auth for exposing the
+# dashboard beyond this machine.
 bash deploy/startup_flir_ptz.sh <CAMERA_IP> [364c|m232]
+
 bash deploy/startup_flir_ptz.sh stop
 ```
+
+Run it, do not `source` it. The camera IP is required.
+
+Streams are pulled **on demand**: `mediamtx` reports `ready=false` until a
+viewer actually opens one, then connects to the camera. That is expected, not a
+fault — check with:
+
+```bash
+curl -s http://127.0.0.1:9997/v3/paths/list
+```
+
+`ffmpeg` is **not** needed for WebRTC video; it is only used by the MJPEG
+fallback that the UI switches to when WebRTC cannot be reached.
 
 Downloads mediamtx for the host architecture, configures nginx with Basic Auth,
 and starts the stream server. The camera IP is required — there is no default.
