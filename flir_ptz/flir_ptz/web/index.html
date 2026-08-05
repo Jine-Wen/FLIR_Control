@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FLIR PTZ Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div id="camDisconnectWarn" class="cam-disconnect-warn">
+  <span id="camDisconnectWarnText">⚠ Camera disconnected.</span>
+  <a href="/setup">Re-connect →</a>
+</div>
+
+<main class="app-shell">
+
+  <!-- ── Topbar ──────────────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <p class="eyebrow">FLIR Nexus</p>
+      <h1>PTZ Control</h1>
+    </div>
+
+    <div class="topbar-status">
+      <!-- Connection -->
+      <div class="status-item">
+        <span class="status-dot" id="connDot"></span>
+        <span class="status-label" id="connectionBadge">No State</span>
+      </div>
+      <!-- Active state pills (only visible when active) -->
+      <span id="movingBadge"  class="state-pill">Moving</span>
+      <span id="scanBadge"    class="state-pill">Scanning</span>
+      <!-- Control source -->
+      <div class="status-item ctrl-src-item">
+        <span class="status-sublabel">CTRL</span>
+        <span class="status-label" id="ctrlBadge">—</span>
+      </div>
+    </div>
+
+    <div class="topbar-right">
+    </div>
+  </header>
+
+  <!-- ── Layout ──────────────────────────────────────────────────── -->
+  <section class="layout">
+
+    <!-- Video panes -->
+    <div class="video-grid" id="videoGrid">
+      <article class="video-pane ir">
+        <div class="video-head">
+          <div><p class="eyebrow">Infrared</p><h2>IR Stream</h2></div>
+          <div class="video-actions">
+            <button data-launch="ir">▶ Stream</button>
+            <button data-retry="ir" class="secondary" hidden>↻ WebRTC</button>
+            <button data-stop="ir" class="secondary">■ Stop</button>
+          </div>
+        </div>
+        <div class="scope">
+          <video id="irVideo" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;background:#000;"></video>
+          <img id="irMjpeg" class="mjpeg-img" alt="IR MJPEG fallback stream" style="display:none;">
+          <div class="reticle" id="irReticle"></div>
+          <div class="stream-state" id="irState">Not streaming</div>
+        </div>
+        <div class="video-foot">
+          <span id="irTransport">—</span>
+          <code id="irUrl">—</code>
+        </div>
+      </article>
+
+      <div id="eoPaneWrap">
+      <article class="video-pane eo">
+        <div class="video-head">
+          <div><p class="eyebrow">Electro-Optical</p><h2>EO Stream</h2></div>
+          <div class="video-actions">
+            <button data-launch="eo">▶ Stream</button>
+            <button data-retry="eo" class="secondary" hidden>↻ WebRTC</button>
+            <button data-stop="eo" class="secondary">■ Stop</button>
+          </div>
+        </div>
+        <div class="scope">
+          <video id="eoVideo" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;background:#000;"></video>
+          <img id="eoMjpeg" class="mjpeg-img" alt="EO MJPEG fallback stream" style="display:none;">
+          <div class="reticle" id="eoReticle"></div>
+          <div class="stream-state" id="eoState">Not streaming</div>
+        </div>
+        <div class="video-foot">
+          <span id="eoTransport">—</span>
+          <code id="eoUrl">—</code>
+        </div>
+      </article>
+      </div><!-- #eoPaneWrap -->
+    </div>
+
+    <!-- Control sidebar -->
+    <aside class="control-stack">
+
+      <!-- Joystick -->
+      <section class="panel joystick-panel" id="joyPanel">
+        <div class="panel-head">
+          <div><p class="eyebrow">Track</p><h2>Joystick</h2></div>
+          <output id="joyVector" style="font-size:.75rem;color:var(--muted)">0.00 / 0.00</output>
+        </div>
+        <div id="joystick" class="joystick" aria-label="PTZ joystick">
+          <div class="axis horizontal"></div>
+          <div class="axis vertical"></div>
+          <div id="stick" class="stick"></div>
+        </div>
+        <label class="field">
+          <span>Max speed</span>
+          <input id="joyGain" type="range" min="1" max="40" value="12">
+          <output id="joyGainValue" style="font-size:.75rem;color:var(--muted)">12 °/s</output>
+        </label>
+      </section>
+
+      <!-- Move To -->
+      <section class="panel" id="movePanel">
+        <div class="panel-head">
+          <div><p class="eyebrow">Move</p><h2>Move To</h2></div>
+        </div>
+        <div class="form-grid">
+          <label class="field"><span>Azimuth (°)</span>
+            <input id="moveAz" type="number" step="0.1" value="0" placeholder="0.0">
+          </label>
+          <label class="field"><span>Elevation (°)</span>
+            <input id="moveEl" type="number" step="0.1" value="0" placeholder="0.0">
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="moveButton">Move To</button>
+          <button id="centerButton" class="secondary">Center</button>
+          <button id="homeButton" class="secondary">Home</button>
+        </div>
+      </section>
+
+      <!-- Scan -->
+      <section class="panel" id="scanPanel">
+        <div class="panel-head">
+          <div><p class="eyebrow">Auto</p><h2>Scan</h2></div>
+        </div>
+        <div class="form-grid">
+          <label class="field"><span>Center AZ (°)</span>
+            <input id="scanCenter" type="number" step="1" value="0">
+          </label>
+          <label class="field"><span>Each Side (°)</span>
+            <input id="scanSide" type="number" step="1" value="20">
+          </label>
+          <label class="field"><span>Elevation (°)</span>
+            <input id="scanEl" type="number" step="1" value="5">
+          </label>
+          <label class="field"><span>Speed (°/s)</span>
+            <input id="scanSpeed" type="number" step="0.5" value="5">
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="scanStart">▶ Start</button>
+          <button id="scanStop" class="danger">■ Stop</button>
+        </div>
+      </section>
+
+    </aside>
+  </section>
+
+  <!-- ── Telemetry Bar ────────────────────────────────────────────── -->
+  <section class="telemetry">
+    <div class="metric geo">
+      <span class="label">Geo AZ</span>
+      <span class="value" id="geoAz">--</span><span class="unit">°</span>
+    </div>
+    <div class="metric geo">
+      <span class="label">Geo EL</span>
+      <span class="value" id="geoEl">--</span><span class="unit">°</span>
+    </div>
+    <div class="metric abs">
+      <span class="label">Abs AZ</span>
+      <span class="value" id="absAz">--</span><span class="unit">°</span>
+    </div>
+    <div class="metric abs">
+      <span class="label">Abs EL</span>
+      <span class="value" id="absEl">--</span><span class="unit">°</span>
+    </div>
+    <div class="metric spd">
+      <span class="label">Spd AZ</span>
+      <span class="value" id="speedX">--</span><span class="unit">°/s</span>
+      <div class="spd-bar"><div class="spd-bar-fill" id="barX"></div></div>
+    </div>
+    <div class="metric spd">
+      <span class="label">Spd EL</span>
+      <span class="value" id="speedY">--</span><span class="unit">°/s</span>
+      <div class="spd-bar"><div class="spd-bar-fill" id="barY"></div></div>
+    </div>
+    <div class="metric">
+      <span class="label">Mode</span>
+      <span class="value" id="modeBadge" style="font-size:.85rem">--</span>
+    </div>
+  </section>
+
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

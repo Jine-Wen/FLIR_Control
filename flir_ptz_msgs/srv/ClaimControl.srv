@@ -1,0 +1,6 @@
+string source
+bool release
+---
+bool granted
+string owner
+builtin_interfaces/Time expires

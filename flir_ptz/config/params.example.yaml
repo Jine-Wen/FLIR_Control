@@ -1,0 +1,74 @@
+# flir_ptz — example parameter file.
+#
+# Copy this file, fill in the empty credential fields, and load it with
+# `ros2 launch flir_ptz flir_ptz.launch.py params_file:=<your_copy>.yaml`
+# (or pass individual overrides as launch arguments).
+#
+# Credential precedence (low -> high), see control/config.py:
+#   YAML file (this file)  ->  environment variables
+#   (FLIR_HOST / FLIR_USERNAME / FLIR_PASSWORD / FLIR_MODEL)
+#   ->  explicit overrides (launch arguments, web setup page)
+#
+# NEVER commit a copy of this file with real credentials filled in.
+# Local copies matching config/*.local.yaml are gitignored for this reason.
+
+flir_ptz:
+  ros__parameters:
+    # ── Camera connection (CameraConfig) ────────────────────────────────────
+    host: ""                # e.g. "192.168.1.50" -- camera IP address. MUST be
+                             # left empty here; set via FLIR_HOST or the web UI.
+    username: ""             # e.g. "admin"
+    password: ""             # never store a real password in a committed file
+    login_mode: "basic"      # "basic" = 364C (HTTP Basic Auth), "post" = M232
+    model: "364c"             # "364c" or "m232"
+
+    # ── Control loop timing (ControlConfig) ─────────────────────────────────
+    poll_hz: 10.0             # IDLE-mode state publish rate (Hz)
+    poll_ms: 60                # active-mode tick period (ms)
+    scan_poll_ms: 150          # SCAN_ACTIVE tick period (ms)
+
+    # ── Arrival / hold tolerances ────────────────────────────────────────────
+    az_tol: 0.5                # azimuth arrival tolerance (deg)
+    el_tol: 0.5                # elevation arrival tolerance (deg)
+    az_hold_tol: 0.7            # azimuth hold hysteresis for TRACK mode (deg)
+    el_hold_tol: 0.7            # elevation hold hysteresis for TRACK mode (deg)
+    settle_samples: 4           # consecutive in-tolerance samples before "arrived"
+
+    # ── Idle / timeout behaviour ─────────────────────────────────────────────
+    track_idle_s: 1.5           # TRACK mode exits after this long with no intent
+    velocity_idle_s: 1.5        # VELOCITY mode exits after this long with no intent
+    goto_grace_s: 1.5           # GOTO stall-detection grace period (s)
+    stall_timeout_s: 4.0         # GOTO gives up (hands back to JCU) after this long stalled
+    stall_progress_deg: 0.05     # minimum progress per grace window to not be "stalled"
+
+    # ── Homing ────────────────────────────────────────────────────────────────
+    home_az: 0.0
+    home_el: -90.0
+    home_timeout_s: 20.0
+
+    # ── Token policy (nexus/token.py TokenPolicy) ────────────────────────────
+    hold_token: false           # true = never release control (no JCU on this deployment)
+    token_grace_s: 30.0          # keep token this long after the last command
+    token_keepalive_s: 10.0      # keepalive interval while token grace is active
+
+    # ── Control-source arbitration (control/arbitration.py Arbiter) ──────────
+    lease_s: 60.0                 # control-source lease duration (s)
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+    verbose: true                 # enable verbose logging
+    namespace: ""                  # ROS namespace for all flir_ptz nodes
+
+flir_ptz_web:
+  ros__parameters:
+    host: ""                # camera IP; same precedence rules as above
+    bind_host: "0.0.0.0"     # web console bind address
+    port: 8080                # web console port
+    rtsp_port: 8554            # camera RTSP port
+    ir_rtsp_path: "ir.0"       # IR stream RTSP path (364C=ir.0, M232=ir)
+    eo_rtsp_path: "vis.0"      # EO stream RTSP path (364C=vis.0, M232=N/A)
+    launch_web: true            # whether the launch file starts this node
+
+flir_joy_bridge:
+  ros__parameters:
+    joy_topic: "/joy"          # joystick input topic to subscribe to
+    launch_joy: true             # whether the launch file starts this node

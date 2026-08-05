@@ -1,0 +1,15 @@
+# PTZ camera state polled from PTLastNMEAGet
+std_msgs/Header header
+
+float64 abs_azimuth      # Absolute azimuth (degrees)
+float64 abs_elevation    # Absolute elevation (degrees)
+float64 geo_azimuth      # Geographic azimuth (degrees)
+float64 geo_elevation    # Geographic elevation (degrees)
+float64 speed_x          # Current azimuth speed (deg/s)
+float64 speed_y          # Current elevation speed (deg/s)
+int32   mode             # 0=stopped, 1=auto-scan, other=moving
+
+bool    is_moving        # True while move_to closed-loop is active
+bool    is_scanning      # True while auto-scan mode is active
+int32   active_move_seq  # Sequence number of current move command
+int32   active_scan_seq  # Sequence number of current scan command

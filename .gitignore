@@ -1,0 +1,17 @@
+# ROS 2 / colcon build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# mediamtx binary (downloaded by deploy/startup_flir_ptz.sh, not committed)
+deploy/mediamtx
+tools/mediamtx
+
+# Local credential overrides — real IPs/passwords must never be committed
+config/*.local.yaml
+flir_ptz/config/*.local.yaml

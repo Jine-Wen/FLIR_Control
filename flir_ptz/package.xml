@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>flir_ptz</name>
+  <version>1.0.0</version>
+  <description>
+    ROS 2 control package for FLIR PTZ cameras (364C and M232 compatible).
+    Communicates over HTTP (Nexus.cgi) and exposes state publishing,
+    closed-loop absolute move, tracking, auto-scan, and a web control
+    console over SSE.
+  </description>
+
+  <maintainer email="maintainers@example.invalid">FLIR PTZ Maintainers</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>flir_ptz_msgs</exec_depend>
+  <exec_depend>python3-httpx</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

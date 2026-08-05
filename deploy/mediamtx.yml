@@ -1,0 +1,42 @@
+# mediamtx config for FLIR PTZ low-latency WebRTC streaming
+# Edit CAMERA_IP to match your camera IP (or pass via setup_mediamtx.sh <CAMERA_IP>)
+
+logLevel: warn
+logDestinations: [stdout]
+
+# ── REST API (for dynamic path updates on model switch) ─────────────────────
+api: yes
+apiAddress: :9997
+
+# ── RTSP server (mediamtx internal, camera → mediamtx) ──────────────────────
+rtsp: yes
+rtspAddress: :8554          # internal port, avoids clash with camera's :8554
+
+# ── WebRTC ──────────────────────────────────────────────────────────────────
+webrtc: yes
+webrtcAddress: :8889
+# Allow browser on same host — adjust if browser is on different machine
+webrtcAdditionalHosts: []
+# No STUN/TURN needed for local LAN (browser and mediamtx on same host)
+
+# ── Disable unused protocols ────────────────────────────────────────────────
+hls: no
+srt: no
+rtmp: no
+
+# ── Stream paths ────────────────────────────────────────────────────────────
+# Default sources use 364C paths. setup_mediamtx.sh patches these for M232.
+# The web node also updates these dynamically via the mediamtx REST API
+# when the model is switched in the web UI.
+paths:
+  ir:
+    source: rtsp://CAMERA_IP:8554/ir.0   # 364C default; M232 → ir
+    sourceProtocol: udp
+    sourceOnDemand: yes
+    sourceOnDemandCloseAfter: 30s
+
+  eo:
+    source: rtsp://CAMERA_IP:8554/vis.0  # 364C only; not used for M232
+    sourceProtocol: udp
+    sourceOnDemand: yes
+    sourceOnDemandCloseAfter: 30s
