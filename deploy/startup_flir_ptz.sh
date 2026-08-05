@@ -284,28 +284,40 @@ if pgrep -x mediamtx &>/dev/null; then
     sleep 1
 fi
 
-HOST_IP=$(hostname -I | awk '{print $1}')
+# This host can be reachable on several networks (commonly one interface on
+# the camera's subnet and another on the uplink). `hostname -I | awk {print $1}`
+# picks whichever happens to come first, which is frequently NOT the address the
+# operator's browser can reach -- and the browser must reach THIS machine, not
+# the camera, because mediamtx runs here. Listing every candidate address is
+# far less misleading than guessing one.
+# IPv4 only: bare IPv6 literals would need [brackets] in a URL and just
+# add noise here.
+HOST_IPS=$(hostname -I | tr ' ' '\n' | grep -E '^[0-9]+\.' | tr '\n' ' ')
+HOST_IP=$(echo "$HOST_IPS" | awk '{print $1}')
 
 echo ""
 echo ""
-if [ "$VIDEO_ONLY" = "1" ]; then
-    echo -e "${BOLD}  Video endpoints (browser connects to these directly):${NC}"
-    echo    "    WebRTC IR   http://${HOST_IP}:8889/ir"
-    [ "$MODEL" != "m232" ] && \
-    echo    "    WebRTC EO   http://${HOST_IP}:8889/eo"
-    echo    "    mediamtx API http://127.0.0.1:9997/v3/paths/list"
-    echo ""
-    echo -e "${YELLOW}    Streams are pulled on demand: they read 'ready=false'${NC}"
-    echo -e "${YELLOW}    until a viewer actually opens them. That is normal.${NC}"
-else
-    echo -e "${BOLD}  Service URLs:${NC}"
-    echo    "    Dashboard (nginx)  http://${HOST_IP}:${NGINX_PORT}/"
-    echo    "    Dashboard (direct) http://${HOST_IP}:8080/"
-    echo    "    WebRTC IR          http://${HOST_IP}:8889/ir"
-    [ "$MODEL" != "m232" ] && \
-    echo    "    WebRTC EO          http://${HOST_IP}:8889/eo"
-    echo    "    Auth user          ${AUTH_USER}"
+echo -e "${BOLD}  Open the dashboard on ONE of these addresses -- whichever your${NC}"
+echo -e "${BOLD}  browser can actually reach. WebRTC follows the same address${NC}"
+echo -e "${BOLD}  automatically, so the two can never disagree.${NC}"
+echo ""
+for _ip in $HOST_IPS; do
+    if [ "$VIDEO_ONLY" = "1" ]; then
+        echo "    http://${_ip}:8080/        (WebRTC on ${_ip}:8889)"
+    else
+        echo "    http://${_ip}:8080/        direct"
+        echo "    http://${_ip}:${NGINX_PORT}/        via nginx"
+    fi
+done
+echo ""
+echo    "    Camera (RTSP source, NOT the dashboard): ${CAMERA_IP}"
+echo    "    mediamtx API: http://127.0.0.1:9997/v3/paths/list"
+if [ "$VIDEO_ONLY" != "1" ]; then
+    echo "    Auth user   : ${AUTH_USER}"
 fi
+echo ""
+echo -e "${YELLOW}    Streams are pulled on demand: they read 'ready=false'${NC}"
+echo -e "${YELLOW}    until a viewer opens them. That is normal.${NC}"
 echo ""
 
 ok "Starting mediamtx in background..."

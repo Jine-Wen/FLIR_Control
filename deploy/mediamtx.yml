@@ -1,7 +1,7 @@
 # mediamtx config for FLIR PTZ low-latency WebRTC streaming
 # Edit CAMERA_IP to match your camera IP (or pass via setup_mediamtx.sh <CAMERA_IP>)
 
-logLevel: warn
+logLevel: info
 logDestinations: [stdout]
 
 # ── REST API (for dynamic path updates on model switch) ─────────────────────
@@ -29,10 +29,20 @@ webrtcAddress: :8889
 webrtcLocalTCPAddress: :8189
 webrtcLocalUDPAddress: :8189
 
-# If the browser still cannot reach the advertised candidates (a different
-# subnet, or a VPN), list the address the browser should use here, e.g.
-#   webrtcAdditionalHosts: [192.168.1.20]
-webrtcAdditionalHosts: []
+# Extra addresses to advertise as ICE candidates, on top of the host's own
+# interface addresses.
+#
+# 127.0.0.1 is here because mediamtx otherwise only advertises its real
+# interface IPs (172.x / 192.168.x). A browser reaching the dashboard through
+# a loopback port-forward -- e.g. a Windows browser opening
+# http://localhost:8080 against WSL2 -- can complete the WHEP handshake over
+# the forwarded TCP port yet have no route to those advertised candidates, so
+# no media ever arrives. Advertising 127.0.0.1 gives it one it can reach,
+# which the forwarder handles over ICE-TCP.
+#
+# If the browser is on another machine, add the address it uses to reach this
+# host, e.g. webrtcAdditionalHosts: [127.0.0.1, 192.168.1.20]
+webrtcAdditionalHosts: [127.0.0.1]
 
 # No STUN/TURN: this is a LAN deployment. Add servers here only if the
 # dashboard is ever reached across NAT.
