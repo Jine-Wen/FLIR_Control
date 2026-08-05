@@ -1,0 +1,73 @@
+# mediamtx config — TRANSCODING variant. OPTIONAL; you probably do not need it.
+#
+# Try plain mediamtx.yml first. Direct passthrough is known to work with this
+# camera in a normal Chrome/Edge browser, so reach for this file only if you
+# have positively established that your browser cannot decode the camera's
+# bitstream — signalling succeeds, mediamtx shows the path ready with
+# bytesReceived climbing, and the pane is still black after a minute.
+#
+# For the record, so nobody has to re-measure it: the FLIR 364C emits H264
+# High profile level 4.0 on both ir.0 and vis.0 (its RTSP SDP's
+# sprop-parameter-sets decodes to profile_idc=100, level_idc=40, i.e.
+# profile-level-id 640028), at 7.5 fps for IR and 30 fps for EO. That is
+# outside the Constrained Baseline / Constrained High 3.1 that Chrome
+# advertises for WebRTC reception, yet it decodes fine in practice on desktop
+# Chrome, which generally accepts High profile via hardware decode. So a black
+# pane is much more likely to be a client-side or fallback-logic problem than a
+# codec problem — check that first.
+#
+# If you do need it, this re-encodes to Constrained Baseline 3.1 on demand.
+# Requires ffmpeg:
+#
+#     sudo apt install ffmpeg
+#
+# Cost: one ffmpeg process per stream while somebody is watching, plus a frame
+# or two of latency. The zero-cost alternative is to set the camera's encoder
+# to Baseline in its own web UI if it offers that — its Nexus CGI API does not
+# (every VIDEO*Get action returns RC=7 "Invalid function").
+#
+# Started for you by:  bash deploy/startup_flir_ptz.sh --transcode <CAMERA_IP>
+
+logLevel: warn
+logDestinations: [stdout]
+
+api: yes
+apiAddress: :9997
+
+rtsp: yes
+rtspAddress: :8554
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalTCPAddress: :8189
+webrtcLocalUDPAddress: :8189
+webrtcAdditionalHosts: []
+webrtcICEServers2: []
+
+hls: no
+srt: no
+rtmp: no
+
+paths:
+  # No `source:` here on purpose. With runOnDemand, ffmpeg is the publisher:
+  # mediamtx starts it when the first viewer arrives and stops it
+  # runOnDemandCloseAfter later, so an unwatched camera costs nothing.
+  ir:
+    runOnDemand: >
+      ffmpeg -nostdin -loglevel warning
+      -rtsp_transport tcp -i rtsp://CAMERA_IP:8554/IR_PATH
+      -c:v libx264 -profile:v baseline -level 3.1
+      -preset ultrafast -tune zerolatency -g 15 -bf 0
+      -an -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/ir
+    runOnDemandRestart: yes
+    runOnDemandCloseAfter: 30s
+
+  eo:
+    runOnDemand: >
+      ffmpeg -nostdin -loglevel warning
+      -rtsp_transport tcp -i rtsp://CAMERA_IP:8554/EO_PATH
+      -c:v libx264 -profile:v baseline -level 3.1
+      -preset ultrafast -tune zerolatency -g 15 -bf 0
+      -an -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/eo
+    runOnDemandRestart: yes
+    runOnDemandCloseAfter: 30s

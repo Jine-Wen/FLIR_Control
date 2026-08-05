@@ -145,6 +145,28 @@ const peerConnections = {};
 // Per-stream active transport: 'idle' | 'webrtc' | 'mjpeg'
 const streamTransport = { ir: "idle", eo: "idle" };
 
+// How long a transient "disconnected" may last before we give up on WebRTC.
+const DISCONNECT_GRACE_MS = 6000;
+// How long to wait for the first media track before falling back.
+const MEDIA_TIMEOUT_MS = 10000;
+
+const disconnectTimers = { ir: null, eo: null };
+const mediaWatchdogs   = { ir: null, eo: null };
+
+function clearDisconnectGrace(stream) {
+  if (disconnectTimers[stream]) {
+    clearTimeout(disconnectTimers[stream]);
+    disconnectTimers[stream] = null;
+  }
+}
+
+function clearMediaWatchdog(stream) {
+  if (mediaWatchdogs[stream]) {
+    clearTimeout(mediaWatchdogs[stream]);
+    mediaWatchdogs[stream] = null;
+  }
+}
+
 function setTransportLabel(stream, label, colorVar) {
   diffText(ui[`${stream}Transport`], `${stream}Transport`, label);
   diffStyle(ui[`${stream}Transport`], `${stream}TransportColor`, "color", colorVar);
@@ -187,14 +209,58 @@ async function startWebRTC(stream) {
     if (reticle) reticle.style.display = "none";
     setStreamState(stream, "● Streaming", "var(--green)");
     setTransportLabel(stream, "WebRTC", "var(--green)");
+    clearDisconnectGrace(stream);
   };
 
+  // Falling back to MJPEG tears down a working peer connection, so only do it
+  // when WebRTC is genuinely dead.
+  //
+  // "disconnected" is NOT dead. Per the WebRTC spec it is a transient state
+  // that routinely recovers on its own -- an ICE consent-freshness hiccup or a
+  // moment of packet loss is enough to enter it. Treating it as failure kills a
+  // perfectly good stream mid-playback and swaps in MJPEG, which then needs
+  // ffmpeg on the server; without ffmpeg the pane just goes black. Only
+  // "failed" is terminal, so give "disconnected" a grace period to recover.
   pc.onconnectionstatechange = () => {
-    if (["failed", "disconnected"].includes(pc.connectionState) && streamTransport[stream] === "webrtc") {
-      // Auto fallback to MJPEG on WebRTC failure.
-      startMjpeg(stream);
+    if (peerConnections[stream] !== pc) return;
+    const state = pc.connectionState;
+
+    if (state === "connected") {
+      clearDisconnectGrace(stream);
+      setStreamState(stream, "● Streaming", "var(--green)");
+      return;
+    }
+
+    if (state === "failed") {
+      clearDisconnectGrace(stream);
+      if (streamTransport[stream] === "webrtc") startMjpeg(stream);
+      return;
+    }
+
+    if (state === "disconnected" && streamTransport[stream] === "webrtc") {
+      if (disconnectTimers[stream]) return;   // already counting down
+      setStreamState(stream, "⟳ Reconnecting…", "var(--amber)");
+      disconnectTimers[stream] = setTimeout(() => {
+        disconnectTimers[stream] = null;
+        if (peerConnections[stream] !== pc) return;
+        if (pc.connectionState === "disconnected" && streamTransport[stream] === "webrtc") {
+          startMjpeg(stream);
+        }
+      }, DISCONNECT_GRACE_MS);
     }
   };
+
+  // If signalling succeeds but no media ever arrives, nothing above fires and
+  // the pane would sit black forever. Fall back once, after a grace period.
+  clearMediaWatchdog(stream);
+  mediaWatchdogs[stream] = setTimeout(() => {
+    mediaWatchdogs[stream] = null;
+    if (peerConnections[stream] !== pc) return;
+    if (streamTransport[stream] === "webrtc" && !videoEl.srcObject) {
+      setStreamState(stream, "✕ no media from WebRTC", "var(--red)");
+      startMjpeg(stream);
+    }
+  }, MEDIA_TIMEOUT_MS);
 
   // Create offer
   const offer = await pc.createOffer();

@@ -60,13 +60,44 @@ FAKE_HOST = "192.0.2.10"  # RFC 5737 TEST-NET-1 -- never a real camera IP
 
 
 def test_module_imports_without_rclpy():
-    # If rclpy were importable in this env this would still pass (the
-    # module degrades gracefully either way); the interesting assertion
-    # for THIS environment (ARCHITECTURE.md sec 0: rclpy not importable
-    # unless ROS is sourced, and it is not sourced for pytest) is that
-    # _ROS_AVAILABLE reflects reality and nothing raised on import.
-    assert web_node._ROS_AVAILABLE is False
-    assert not hasattr(web_node, "FlirPtzWebNode")
+    """web_node must import cleanly where rclpy is unavailable.
+
+    Masks rclpy in a subprocess rather than asserting the machine lacks it.
+    The earlier version asserted `_ROS_AVAILABLE is False`, which passed only
+    in a shell with no ROS sourced and failed in the environment the package
+    actually runs in -- the opposite of useful.
+    """
+    import subprocess
+    import textwrap
+
+    code = textwrap.dedent(
+        """
+        import sys
+        sys.modules["rclpy"] = None   # makes `import rclpy` raise ImportError
+        import flir_ptz.nodes.web_node as w
+        assert w._ROS_AVAILABLE is False
+        assert not hasattr(w, "FlirPtzWebNode")
+        # The pure helpers must remain available with no ROS at all.
+        assert w.streams_for_model("364c", "10.0.0.1")["ir"].startswith("rtsp://")
+        print("OK")
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(_PKG_ROOT), capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "OK" in proc.stdout
+
+
+def test_ros_node_class_is_defined_when_rclpy_is_available():
+    """The other half of the contract: where rclpy IS importable, the node
+    class must actually exist. Without this, a module that silently failed to
+    define FlirPtzWebNode would look 'fine' to the suite above."""
+    if web_node._ROS_AVAILABLE:
+        assert hasattr(web_node, "FlirPtzWebNode")
+    else:
+        pytest.skip("rclpy not importable here; covered by the masked-import test")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -305,12 +336,19 @@ def test_resolve_web_root_explicit_param_expands_user_and_resolves(tmp_path: Pat
     assert resolved == (tmp_path / "web_home").resolve()
 
 
-def test_resolve_web_root_falls_back_to_source_tree_when_no_param_and_no_ament():
-    # ament_index_python is not installed in this environment
-    # (ARCHITECTURE.md sec 0), so this exercises the graceful-degradation
-    # path for real, with no mocking needed.
-    with pytest.raises(ImportError):
-        import ament_index_python  # noqa: F401
+def test_resolve_web_root_falls_back_to_source_tree_when_no_param_and_no_ament(monkeypatch):
+    """Graceful degradation when ament_index_python cannot be imported.
+
+    This must test the CODE, not the machine. An earlier version asserted that
+    the module was genuinely absent, which made the test pass only in a shell
+    with no ROS sourced -- and fail in exactly the environment the package
+    actually runs in, since sourcing setup.bash puts ament_index_python on the
+    path. Mask the import instead so the degradation path is exercised
+    regardless of what happens to be installed.
+    """
+    monkeypatch.setitem(sys.modules, "ament_index_python", None)
+    monkeypatch.setitem(sys.modules, "ament_index_python.packages", None)
+
     resolved = web_node.resolve_web_root("")
     assert resolved == Path(web_node.__file__).resolve().parent.parent / "web"
     assert (resolved / "index.html").exists()

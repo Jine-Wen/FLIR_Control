@@ -12,6 +12,11 @@
 #   bash deploy/startup_flir_ptz.sh <CAMERA_IP> [MODEL] [AUTH_USER] [AUTH_PASS]
 #
 # Flags:
+#   --transcode        Re-encode the camera's H264 to Baseline with ffmpeg so
+#                      browsers can decode it over WebRTC. Needed because the
+#                      364C emits High profile 4.0, which Chrome/Edge cannot
+#                      receive -- the symptom is a black video pane despite a
+#                      successful handshake. Requires ffmpeg.
 #   --video-only       Only download and start mediamtx. Skips nginx, Basic
 #                      Auth and every sudo step. This is all you need for the
 #                      dashboard's WebRTC video; nginx is only for exposing
@@ -44,11 +49,13 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 # ── Flags (must be parsed before positional arguments) ───────────────────────
 INSTALL_SUDOERS=0
 VIDEO_ONLY=0
+TRANSCODE=0
 _args=()
 for _a in "$@"; do
     case "$_a" in
         --install-sudoers) INSTALL_SUDOERS=1 ;;
         --video-only)      VIDEO_ONLY=1 ;;
+        --transcode)       TRANSCODE=1 ;;
         *)                 _args+=("$_a") ;;
     esac
 done
@@ -80,7 +87,11 @@ fi
 
 MEDIAMTX_VERSION="v1.9.1"
 MEDIAMTX_BIN="$SCRIPT_DIR/mediamtx"
-MEDIAMTX_CONFIG="$SCRIPT_DIR/mediamtx.yml"
+if [ "${TRANSCODE:-0}" = "1" ]; then
+    MEDIAMTX_CONFIG="$SCRIPT_DIR/mediamtx-transcode.yml"
+else
+    MEDIAMTX_CONFIG="$SCRIPT_DIR/mediamtx.yml"
+fi
 NGINX_CONF_SRC="$SCRIPT_DIR/nginx-flir.conf"
 NGINX_CONF_DST="/etc/nginx/sites-available/flir-ptz"
 NGINX_ENABLED="/etc/nginx/sites-enabled/flir-ptz"

@@ -15,9 +15,28 @@ rtspAddress: :8554          # internal port, avoids clash with camera's :8554
 # ── WebRTC ──────────────────────────────────────────────────────────────────
 webrtc: yes
 webrtcAddress: :8889
-# Allow browser on same host — adjust if browser is on different machine
+
+# ICE-TCP, offered alongside the default UDP candidates. Purely additive: a
+# browser that can reach the UDP candidate still uses it, because UDP has the
+# higher ICE priority.
+#
+# It is here as a safety net for topologies where UDP cannot get through but
+# TCP can -- a browser on a different network stack from mediamtx (a Windows
+# browser talking to WSL2, or a VPN that only forwards TCP). In those cases
+# signalling succeeds over :8889, mediamtx advertises host candidates on its
+# own internal addresses, no UDP media ever arrives, and the pane stays black.
+# A TCP candidate gives the browser a route that such setups do forward.
+webrtcLocalTCPAddress: :8189
+webrtcLocalUDPAddress: :8189
+
+# If the browser still cannot reach the advertised candidates (a different
+# subnet, or a VPN), list the address the browser should use here, e.g.
+#   webrtcAdditionalHosts: [192.168.1.20]
 webrtcAdditionalHosts: []
-# No STUN/TURN needed for local LAN (browser and mediamtx on same host)
+
+# No STUN/TURN: this is a LAN deployment. Add servers here only if the
+# dashboard is ever reached across NAT.
+webrtcICEServers2: []
 
 # ── Disable unused protocols ────────────────────────────────────────────────
 hls: no
