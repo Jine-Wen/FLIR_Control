@@ -73,10 +73,18 @@ def test_non_stop_command_from_non_owner_is_blocked():
     assert a.allows("web", is_stop=False, now=0.0) is True
 
 
-def test_non_stop_command_with_no_owner_is_blocked():
+def test_non_stop_command_with_no_owner_is_allowed():
+    """An unowned lease falls open rather than blocking.
+
+    This test previously asserted the opposite. Blocking looked like the
+    conservative choice but deadlocked the camera: once the lease expired
+    through inactivity, every command was silently discarded and the
+    joystick stopped responding for good. There is nobody to protect from
+    when nobody holds the lease.
+    """
     a = Arbiter(lease_s=60.0)
     assert a.owner(now=0.0) == ""
-    assert a.allows("web", is_stop=False, now=0.0) is False
+    assert a.allows("web", is_stop=False, now=0.0) is True
 
 
 # -- lease expiry reverting to no owner ----------------------------------
@@ -180,3 +188,65 @@ def test_release_after_expiry_is_noop_not_an_error():
     result = a.release("web", now=20.0)  # lease already expired
     assert result.owner == ""
     assert a.owner(now=20.0) == ""
+
+
+# ── an expired lease must not deadlock the camera ────────────────────────────
+#
+# Regression guard. `allows()` used to require source == owner for every
+# non-stop command, so once the lease expired through inactivity nobody owned
+# it, EVERY command was silently discarded, and the operator's joystick stopped
+# working with nothing logged. The only way out was performing the unlock
+# gesture again. Arbitration is there to stop two operators fighting, not to
+# lock an idle camera.
+
+
+def test_expired_lease_falls_open_to_the_next_source():
+    a = Arbiter(lease_s=60.0)
+    a.claim("web", now=0.0)
+    assert a.allows("web", is_stop=False, now=10.0) is True
+
+    # Past the lease: unowned, so whoever commands next may drive.
+    assert a.owner(now=100.0) == ""
+    assert a.allows("web", is_stop=False, now=100.0) is True
+    assert a.allows("joy", is_stop=False, now=100.0) is True
+
+
+def test_never_claimed_lease_allows_commands():
+    a = Arbiter(lease_s=60.0)
+    assert a.owner(now=0.0) == ""
+    assert a.allows("web", is_stop=False, now=0.0) is True
+
+
+def test_live_lease_still_excludes_everyone_else():
+    """The fix must not weaken actual contention."""
+    a = Arbiter(lease_s=60.0)
+    a.claim("web", now=0.0)
+    assert a.allows("joy", is_stop=False, now=30.0) is False
+    assert a.allows("web", is_stop=False, now=30.0) is True
+
+
+def test_stop_is_still_always_allowed_even_against_a_live_foreign_lease():
+    a = Arbiter(lease_s=60.0)
+    a.claim("web", now=0.0)
+    assert a.allows("joy", is_stop=True, now=30.0) is True
+
+
+def test_expiry_boundary_is_exact():
+    a = Arbiter(lease_s=60.0)
+    a.claim("web", now=0.0)
+    assert a.owner(now=59.999) == "web"
+    assert a.allows("joy", is_stop=False, now=59.999) is False
+    assert a.owner(now=60.0) == ""
+    assert a.allows("joy", is_stop=False, now=60.0) is True
+
+
+def test_driving_continuously_never_lets_the_lease_lapse():
+    """A joystick sending at 10 Hz must never hit the expiry path."""
+    a = Arbiter(lease_s=60.0)
+    a.claim("web", now=0.0)
+    t = 0.0
+    for _ in range(600):          # 60 s of 10 Hz commands
+        t += 0.1
+        assert a.allows("web", is_stop=False, now=t) is True
+        a.renew("web", now=t)
+    assert a.owner(now=t) == "web"

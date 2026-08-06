@@ -24,6 +24,42 @@ class ClaimResult:
     reason: str
 
 
+def allows_command(
+    owner: str, expires_at: float, source: str, is_stop: bool, now: float
+) -> bool:
+    """THE arbitration rule. Both the authority and its mirrors must use this.
+
+    It lives as a free function, not as an Arbiter method, because two
+    processes need to evaluate it: the PTZ node owns the lease and enforces
+    the decision, while the web node evaluates the same rule against the
+    latched ``flir/control_source`` it mirrors, purely so the browser gets
+    instant feedback instead of a silently-dropped publish.
+
+    That second copy used to be a hand-written re-implementation described as
+    "structurally identical" to this one. It drifted the moment this rule
+    changed: the authority was fixed to let an expired lease fall open, the
+    mirror was not, and the web node went on rejecting every command with
+    ``{"ok": false, "locked": ""}`` before it ever reached the authority. The
+    camera stayed frozen and the fix to the real rule appeared to do nothing.
+    One definition, imported by both, makes that failure impossible.
+
+    Rules:
+      * a stop is ALWAYS allowed, from anyone, regardless of ownership --
+        non-negotiable safety rule;
+      * the current owner is allowed;
+      * an UNOWNED lease (never claimed, or expired through inactivity) is
+        open to whoever commands next. Arbitration exists to stop two
+        operators fighting over the camera, not to lock an idle one.
+    """
+    if is_stop:
+        return True
+    if owner == "":
+        return True
+    if now >= expires_at:
+        return True          # lease lapsed -> unowned -> open
+    return owner == source
+
+
 class Arbiter:
     """Last-claim-wins control-source arbiter with an expiring lease.
 
@@ -86,13 +122,22 @@ class Arbiter:
         regardless of who owns the lease or whether it has expired. A
         stop command must never be blocked by arbitration.
 
-        Non-stop commands require ``source`` to be the current lease
-        owner (established via an explicit ``claim()``, e.g. through the
-        ``ClaimControl`` service) — an unclaimed lease (owner == "")
-        allows no non-stop source through, matching the PTZ node's rule
-        of discarding any command whose ``source`` doesn't match the
-        latched owner.
+        A command from the current owner is allowed. So is a command from
+        anyone when the lease is UNOWNED — either never claimed, or expired
+        through inactivity.
+
+        That last part is deliberate and was a bug when it worked the other
+        way. Arbitration exists to stop two operators fighting over the
+        camera, not to lock it. Refusing an unowned lease protects nobody
+        (there is no one to protect from) and instead deadlocks the system:
+        after `lease_s` of inactivity the owner expires, every subsequent
+        command is silently discarded, and the operator's joystick simply
+        stops working with nothing logged and no way back except performing
+        the unlock gesture again. The camera looked broken.
+
+        So an idle lease falls open, and the next source to command it takes
+        it (the caller is expected to follow up with :meth:`claim`).
+        Contention is unchanged: while somebody holds a live lease, everyone
+        else is still refused.
         """
-        if is_stop:
-            return True
-        return self.owner(now) == source
+        return allows_command(self._owner, self._expires_at, source, is_stop, now)

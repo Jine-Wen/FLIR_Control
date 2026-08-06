@@ -287,8 +287,11 @@ def test_mirrored_allows_stop_command_always_allowed_even_when_locked_by_other()
     assert web_node.mirrored_allows("joy", 2000.0, "web", is_stop=True, now=1000.0) is True
 
 
-def test_mirrored_allows_non_stop_rejected_when_unclaimed():
-    assert web_node.mirrored_allows("", 0.0, "web", is_stop=False, now=1000.0) is False
+def test_mirrored_allows_non_stop_accepted_when_unclaimed():
+    """An unowned lease falls open. See control.arbitration.allows_command --
+    this mirror delegates to that single shared rule precisely so it cannot
+    drift from the authority again."""
+    assert web_node.mirrored_allows("", 0.0, "web", is_stop=False, now=1000.0) is True
 
 
 def test_mirrored_allows_non_stop_rejected_when_owned_by_someone_else():
@@ -299,8 +302,22 @@ def test_mirrored_allows_non_stop_allowed_for_current_owner_before_expiry():
     assert web_node.mirrored_allows("web", 2000.0, "web", is_stop=False, now=1000.0) is True
 
 
-def test_mirrored_allows_non_stop_rejected_once_lease_expired():
-    assert web_node.mirrored_allows("web", 500.0, "web", is_stop=False, now=1000.0) is False
+def test_mirrored_allows_non_stop_accepted_once_lease_expired():
+    """The deadlock this whole change exists to remove: an expired lease used
+    to reject every command here, before it could even reach the authority, so
+    the joystick silently stopped working until the operator repeated the
+    unlock gesture."""
+    assert web_node.mirrored_allows("web", 500.0, "web", is_stop=False, now=1000.0) is True
+    # ...and a different source may take over an expired lease too.
+    assert web_node.mirrored_allows("web", 500.0, "joy", is_stop=False, now=1000.0) is True
+
+
+def test_mirrored_allows_still_rejects_against_a_live_foreign_lease():
+    """Contention is unchanged: a live owner still excludes everyone else."""
+    assert web_node.mirrored_allows("web", 1000.0, "joy", is_stop=False, now=500.0) is False
+    assert web_node.mirrored_allows("web", 1000.0, "web", is_stop=False, now=500.0) is True
+    # A stop is never blocked, even against a live foreign lease.
+    assert web_node.mirrored_allows("web", 1000.0, "joy", is_stop=True, now=500.0) is True
 
 
 def test_is_zero_speed():
@@ -712,12 +729,19 @@ def test_c17_claim_denied_reflects_service_response(tmp_path: Path):
 # -- arbitration mirroring: cmd_* endpoints honour the mirrored latch --------
 
 
-def test_cmd_move_to_allowed_when_unclaimed_and_source_web_is_still_rejected():
-    # An unclaimed lease (owner == "") allows no non-stop source through
-    # -- matches Arbiter.allows()'s documented rule, mirrored here.
+def test_cmd_move_to_accepted_when_lease_is_unclaimed():
+    """A command against an unowned lease must be forwarded, not rejected.
+
+    This asserted the opposite before. Rejecting here was the second half of
+    the deadlock: even after the authority was fixed to let an idle lease fall
+    open, this mirror kept answering {"ok": false, "locked": ""} and the
+    command never reached the PTZ node at all, so fixing the real rule looked
+    like it had done nothing.
+    """
     adapter = _NodeLikeAdapter()
     resp = adapter.cmd_move_to({"target_azimuth": 1.0, "target_elevation": 2.0, "source": "web"})
-    assert resp == {"ok": False, "locked": ""}
+    assert resp.get("ok") is True
+    assert "locked" not in resp
 
 
 def test_cmd_move_to_allowed_once_web_holds_the_mirrored_lease():

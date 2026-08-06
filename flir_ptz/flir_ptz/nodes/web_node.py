@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from flir_ptz.control.arbitration import allows_command
 from flir_ptz.control.config import ControlConfig
 from flir_ptz.webui.server import ServerConfig, make_server
 from flir_ptz.webui.sse import SSEHub
@@ -261,25 +262,17 @@ def camera_status_json_to_dict(raw: Any) -> dict[str, str]:
 
 
 def mirrored_allows(owner: str, expires_at: float, source: str, is_stop: bool, now: float) -> bool:
-    """Optimistic, non-authoritative arbitration check against the
-    *mirrored* ``flir/control_source`` latch (see module docstring -- the
-    PTZ node is the real authority and enforces this independently of
-    whatever this function returns).
+    """Optimistic, non-authoritative arbitration check against the *mirrored*
+    ``flir/control_source`` latch.
 
-    Structurally identical to ``control.arbitration.Arbiter.allows`` but
-    deliberately not that class: this node must not run its own lease
-    timer (spec sec 5's "Do not keep an authoritative copy of the owner").
-
-    Safety rule (non-negotiable, API.md sec 3 / ARCHITECTURE.md sec 3.5):
-    ``is_stop=True`` is ALWAYS allowed.
+    The PTZ node is the real authority and enforces this independently; this
+    exists only so the browser gets an immediate ``locked`` response instead
+    of a silently-dropped publish. It therefore delegates to the single shared
+    rule rather than re-implementing it -- a previous hand-written copy went
+    out of sync the moment the rule changed and blocked every command before
+    it could reach the authority.
     """
-    if is_stop:
-        return True
-    if owner == "":
-        return False
-    if now >= expires_at:
-        return False
-    return owner == source
+    return allows_command(owner, expires_at, source, is_stop, now)
 
 
 def is_zero_speed(az_speed: float, el_speed: float) -> bool:

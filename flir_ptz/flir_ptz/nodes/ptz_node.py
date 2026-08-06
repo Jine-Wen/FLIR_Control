@@ -483,7 +483,18 @@ class FlirPtzNode(Node):
                 f"(current owner={self._arbiter.owner(now)!r})"
             )
             return
-        self._arbiter.renew(source, now)
+
+        # An accepted command from a source that does not currently own the
+        # lease means the lease was unowned (Arbiter.allows only lets those
+        # two cases through) -- so take it, rather than merely renewing a
+        # lease nobody holds. Without this the command would be executed but
+        # ownership would stay empty, the next command would be judged
+        # against an empty owner again, and the control_source topic would
+        # never reflect who is actually driving.
+        if self._arbiter.owner(now) != source and not is_stop:
+            self._arbiter.claim(source, now)
+        else:
+            self._arbiter.renew(source, now)
         self._publish_control_source(force=False)
 
         controller = self._controller_ref()
