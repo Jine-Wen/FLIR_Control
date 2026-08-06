@@ -14,20 +14,22 @@ on Humble.
 ```
 FLIR_Control/                    # repo root — not a package
 ├── flir_ptz_msgs/               # ament_cmake — interfaces only
-│   ├── msg/  PtzState  MoveToCmd  JoyStickControlCmd  ScanCmd  ControlSource
+│   ├── msg/  PtzState  MoveToCmd  JoyStickControlCmd  ScanCmd
+│   │         ControlSource  ZoomCmd
 │   └── srv/  ClaimControl
 ├── flir_ptz/                    # ament_python — all the code
 │   ├── flir_ptz/
 │   │   ├── nexus/    protocol.py  token.py  session.py
 │   │   ├── control/  profiles.py  config.py  fsm.py  arbitration.py
-│   │   │             gestures.py  controller.py
+│   │   │             gestures.py  zoom_optics.py  controller.py
 │   │   ├── nodes/    ptz_node.py  web_node.py  joy_bridge.py
 │   │   ├── webui/    server.py  sse.py
 │   │   └── web/      index.html  app.js  styles.css  setup.html  setup.js
 │   ├── launch/flir_ptz.launch.py
 │   ├── config/params.example.yaml
 │   └── test/                    # pytest — no ROS, no camera required
-├── deploy/  startup_flir_ptz.sh  nginx-flir.conf  manage_auth.sh  mediamtx.yml
+├── deploy/  startup_flir_ptz.sh  ros_env.sh  nginx-flir.conf
+│           manage_auth.sh  mediamtx.yml  mediamtx-transcode.yml
 └── README.md
 ```
 
@@ -115,6 +117,17 @@ source install/setup.bash
 ```bash
 cd flir_ptz && python3 -m pytest test/ -q
 ```
+
+513 tests, no ROS, no camera and no third-party packages required. They are not
+installed by `colcon build` and cost nothing at runtime.
+
+Most of them exist because a specific failure already happened once and gave no
+signal when it did — a token deadlock that froze the camera, an arbitration
+lease that killed the joystick after 60 s idle, error responses read as
+successes, a login made impossible by one query parameter, an unlock gesture
+that only worked at one drawing speed, a CSS rule whose absence disabled the
+entire control sidebar, and a lens that would run to its mechanical limit
+unattended. None of those raised an error. Keep them.
 
 ---
 
@@ -226,6 +239,7 @@ ros2 launch flir_ptz flir_ptz.launch.py launch_web:=false launch_joy:=false
 | `/flir/cmd/track` | `MoveToCmd` | subscribed — closed-loop tracking |
 | `/flir/cmd/joy_stick_control` | `JoyStickControlCmd` | subscribed — direct speed |
 | `/flir/cmd/scan` | `ScanCmd` | subscribed — auto-scan start/stop |
+| `/flir/cmd/zoom` | `ZoomCmd` | subscribed — lens zoom, EO or IR |
 | `/flir/camera_config` | `std_msgs/String` (JSON) | subscribed — live reconfigure |
 | `/flir/claim_control` | `ClaimControl` | service |
 
@@ -281,6 +295,58 @@ non-destructive keepalive the camera's own web UI uses, and released afterwards.
     session holds it, an operator is driving: leave the camera alone.
   - `always` — force-claim and park regardless.
   - `never` — never park on exit.
+
+---
+
+## Zoom
+
+Both lenses zoom. Verified on a 364C:
+
+| | Command | Widest | Tele | Range |
+|---|---|---|---|---|
+| **VIS** (EO) | `DLTVZoomCountsIncrement` / `Decrement` / `Stop` | 63.7° | 2.12° | 30.0× optical |
+| **eZoom** (IR) | `IRZoomIn` / `IRZoomOut` / `IRZoomStop` | 18.0° | 8.62° | 2.09× electronic |
+
+Note the naming differs per device — the IR actions are not the DLTV ones with
+the prefix swapped — and so does the state field: DLTV reports `Zoom_pctg`,
+IR reports `Zoom_Pctg`. Reusing one parser for both silently reads 0.0.
+
+Both are **continuous**: one command runs the lens until a stop arrives.
+
+### The dead-man timer
+
+Because a zoom keeps going, the browser re-sends the direction every 400 ms
+while a button is held and the controller stops the lens by itself if no
+renewal arrives within a second. A closed tab, a network drop or a lost
+`pointerup` would otherwise drive the lens to its mechanical limit unattended.
+The frontend also stops on `visibilitychange` and `pagehide`.
+
+A renewal for a direction already running only refreshes that deadline — it
+does not re-issue the command. Telling a lens to start zooming while it is
+already zooming earns `RC=11 Device busy`, so re-issuing filled the log with
+failures and wasted the camera's single serial channel.
+
+`stop` is a stop command for arbitration: always accepted from any source,
+regardless of who owns the lease. Any unrecognised direction is coerced to
+`stop` rather than ignored — for a continuous zoom, "do nothing" is the
+dangerous default.
+
+EO and IR are tracked independently: separate pending slots, deadlines and
+active flags, so zooming one never disturbs the other.
+
+### Magnification
+
+The camera does not report a zoom factor. Probing for capability, limits, lens,
+info and magnification endpoints on both devices finds nothing — only
+`SERVERVersionGet`, `DLTVLastNMEAGet` and `IRLastNMEAGet` answer at all.
+
+It does report live field of view and zoom position as a percentage, and 0% is
+the wide end by definition, so magnification is `widest_fov / current_fov` and
+the reference is *learned from the camera* rather than configured. A reading at
+the wide end is authoritative and is never revised by a narrower one. Until the
+operator zooms out once, `eo_wide_fov_deg` / `ir_wide_fov_deg` stand in. The
+provenance is logged, so it is visible whether a figure is calibrated or still
+resting on a default.
 
 ---
 

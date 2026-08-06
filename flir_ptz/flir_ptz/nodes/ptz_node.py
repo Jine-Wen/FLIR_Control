@@ -71,12 +71,11 @@ from flir_ptz_msgs.srv import ClaimControl
 from flir_ptz.control.arbitration import Arbiter
 from flir_ptz.control.config import CameraConfig, ControlConfig, load_camera_config
 from flir_ptz.control.controller import TickController
-from flir_ptz.control.fsm import Intent, Mode, MotionFSM, StepResult
+from flir_ptz.control.fsm import Intent, MotionFSM, StepResult
 from flir_ptz.control.zoom_optics import (
     EO_WIDE_FOV_DEG,
     IR_WIDE_FOV_DEG,
     WideFovCalibrator,
-    magnification,
 )
 from flir_ptz.nexus.protocol import DltvSample, IrSample, PtSample
 from flir_ptz.nexus.session import CameraSession, NotConfigured
