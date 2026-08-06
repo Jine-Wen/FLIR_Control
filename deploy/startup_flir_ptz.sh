@@ -32,15 +32,45 @@
 #   bash deploy/startup_flir_ptz.sh 192.168.1.50 364c
 #   bash deploy/startup_flir_ptz.sh stop
 
-set -e
+# ── Refuse to run when sourced ───────────────────────────────────────────────
+#
+# This block MUST stay above `set -e`, and `set -e` must stay below it.
+#
+# When a script is sourced it runs in the CALLER'S shell, so `set -e` switches
+# on errexit there. A `return 1` afterwards is then a non-zero status under
+# errexit, which terminates that shell — i.e. the user's terminal window
+# closes. An earlier version had `set -e` first and the guard second, so the
+# very check meant to protect the terminal was what killed it.
+#
+# Everything below also uses `exit` freely, which would likewise close a
+# sourced caller's shell, so refusing outright is the right call.
+_flir_sourced=0
+if [ -n "${BASH_SOURCE:-}" ]; then
+    [ "${BASH_SOURCE[0]}" != "${0}" ] && _flir_sourced=1
+elif [ -n "${ZSH_EVAL_CONTEXT:-}" ]; then
+    case "$ZSH_EVAL_CONTEXT" in *:file) _flir_sourced=1 ;; esac
+fi
 
-# Running this with `source`/`.` would make every `exit` below kill the calling
-# shell. Detect it and bail out politely instead.
-if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
-    echo "Run this script, do not source it:" >&2
-    echo "    bash deploy/startup_flir_ptz.sh <CAMERA_IP> [MODEL]" >&2
+if [ "$_flir_sourced" = "1" ]; then
+    unset _flir_sourced
+    # NB: $0 is the *shell* ("bash") when sourced, not this file — use
+    # BASH_SOURCE so the message names something the reader recognises.
+    _flir_self="${BASH_SOURCE[0]:-deploy/startup_flir_ptz.sh}"
+    echo "" >&2
+    echo "This script must be RUN, not sourced." >&2
+    echo "" >&2
+    echo "  instead of : source $_flir_self" >&2
+    echo "  run        : bash $_flir_self --video-only <CAMERA_IP>" >&2
+    echo "" >&2
+    echo "Sourcing runs it in your current shell, where its 'exit' would" >&2
+    echo "close your terminal. Nothing was changed; your shell is intact." >&2
+    echo "" >&2
+    unset _flir_self
     return 1
 fi
+unset _flir_sourced
+
+set -e
 
 # ── Parameters ───────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,9 +109,22 @@ AUTH_USER="${3:-${FLIR_AUTH_USER:-}}"
 AUTH_PASS="${4:-${FLIR_AUTH_PASS:-}}"
 
 if [ -z "$CAMERA_IP" ]; then
-    echo "Error: camera IP is required (there is deliberately no default)." >&2
-    echo "  usage: bash deploy/startup_flir_ptz.sh <CAMERA_IP> [MODEL] [AUTH_USER] [AUTH_PASS]" >&2
-    echo "  or:    FLIR_HOST=<ip> bash deploy/startup_flir_ptz.sh" >&2
+    echo "" >&2
+    echo "Error: camera IP is required (there is deliberately no default," >&2
+    echo "so nobody ever points this at the wrong camera by accident)." >&2
+    echo "" >&2
+    echo "  video only (mediamtx; no nginx, no sudo — usually what you want):" >&2
+    echo "    bash $0 --video-only <CAMERA_IP> [364c|m232]" >&2
+    echo "" >&2
+    echo "  full (also sets up nginx + Basic Auth):" >&2
+    echo "    bash $0 <CAMERA_IP> [364c|m232]" >&2
+    echo "" >&2
+    echo "  stop everything:" >&2
+    echo "    bash $0 stop" >&2
+    echo "" >&2
+    echo "  the IP may also come from the environment:" >&2
+    echo "    FLIR_HOST=<ip> bash $0 --video-only" >&2
+    echo "" >&2
     exit 1
 fi
 
