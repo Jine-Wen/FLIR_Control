@@ -95,7 +95,7 @@ from flir_ptz.control.fsm import (
     StepResult,
 )
 from flir_ptz.control.profiles import az_error
-from flir_ptz.nexus.protocol import PtSample
+from flir_ptz.nexus.protocol import DltvSample, PtSample
 from flir_ptz.nexus.session import CameraSession, TokenLost
 from flir_ptz.nexus.token import TokenAction, TokenPolicy, TokenTracker
 
@@ -132,6 +132,31 @@ def _default_logger() -> _StdlibLoggerAdapter:
 _FRAME_DIVERGENCE_THRESHOLD_DEG = 1.0
 _FRAME_DIVERGENCE_PERSIST_S = 3.0
 
+# -- EO zoom: orthogonal to MotionFSM, driven straight from the tick -------
+#
+# Zoom is deliberately NOT a MotionFSM mode (it must never disturb whatever
+# pan/tilt mode is currently running) and deliberately NOT executed from a
+# ROS callback thread (the tick loop is the only thing allowed to touch the
+# session -- see module docstring). ``submit_zoom()`` just records the
+# latest requested direction; ``_tick()`` drains it every tick, exactly like
+# ``MotionFSM.submit()``/``step()`` does for pan/tilt, but entirely outside
+# the FSM.
+#
+# Because DLTVZoomCountsIncrement/Decrement are CONTINUOUS -- the lens keeps
+# moving until DLTVZoomStop arrives (measured on a real 364C) -- a dead-man
+# timer is mandatory: while zooming, if no further "in"/"out" request
+# renews it within ``ZOOM_DEADMAN_S``, the tick issues DLTVZoomStop on its
+# own. A dropped pointerup, a closed browser tab, or a network blip must
+# never leave the lens driving to its mechanical limit unattended.
+ZOOM_DEADMAN_S = 1.0
+
+# DLTVLastNMEAGet shares the same single serial CGI channel as PTLastNMEAGet
+# (read every tick already) -- polling it that often would just steal
+# channel slots from pan/tilt for no benefit. Poll on this slow cadence
+# while idle instead, and force one extra read right after a zoom command so
+# the UI reflects a change quickly (see ``_maybe_poll_dltv``).
+ZOOM_POLL_IDLE_S = 2.0
+
 
 class TickController:
     """Owns the single read-then-control tick loop for one connected
@@ -158,6 +183,8 @@ class TickController:
         on_snapshot: Optional[Callable[[Optional[PtSample], StepResult], None]] = None,
         logger: object = None,
         clock: Callable[[], float] = time.monotonic,
+        zoom_deadman_s: float = ZOOM_DEADMAN_S,
+        zoom_poll_idle_s: float = ZOOM_POLL_IDLE_S,
     ) -> None:
         if goto_feedback_frame not in ("abs", "geo"):
             raise ValueError(f"goto_feedback_frame must be 'abs' or 'geo', got {goto_feedback_frame!r}")
@@ -198,6 +225,18 @@ class TickController:
         # discarded via a completion callback once done.
         self._background_tasks: set = set()
 
+        # -- EO zoom: orthogonal to the FSM (see module docstring) --------
+        self._zoom_deadman_s = max(0.0, float(zoom_deadman_s))
+        self._zoom_poll_idle_s = max(0.0, float(zoom_poll_idle_s))
+        self._pending_zoom: Optional[str] = None    # drained once per tick
+        self._zoom_active: bool = False              # lens believed moving
+        self._zoom_deadline: Optional[float] = None  # dead-man expiry
+        self._dltv_sample: Optional[DltvSample] = None
+        self._last_dltv_poll_at: Optional[float] = None
+        # Force one DLTV read on the first opportunity so the UI has a
+        # value to show without having to wait out the idle cadence.
+        self._dltv_poll_due: bool = True
+
     # -- properties ------------------------------------------------------
 
     @property
@@ -207,6 +246,14 @@ class TickController:
     @property
     def fsm(self) -> MotionFSM:
         return self._fsm
+
+    @property
+    def zoom_state(self) -> Optional[DltvSample]:
+        """The most recent DLTVLastNMEAGet reading, or ``None`` before the
+        first successful poll. Read by the ROS node to populate
+        ``PtzState.zoom_pctg``/``zoom_mm`` -- see ``_maybe_poll_dltv`` for
+        the polling cadence."""
+        return self._dltv_sample
 
     # -- submitting intents (the only thing ROS callbacks touch) --------
 
@@ -232,6 +279,31 @@ class TickController:
             self.submit(intent)
             return
         self._loop.call_soon_threadsafe(self.submit, intent)
+
+    def submit_zoom(self, direction: str) -> None:
+        """Record a pending EO zoom request for the next tick to drain.
+
+        Thread-safe -- unlike :meth:`submit`, this may be called from *any*
+        thread, including a ROS subscription callback (mirrors
+        :meth:`submit_threadsafe`). It never touches the camera itself: it
+        only ever writes a small piece of controller-local state plus the
+        wakeup event, which is exactly what makes it safe to call from
+        off-loop -- the tick loop remains the only thing that ever talks to
+        ``session`` (see module docstring). Deliberately bypasses
+        ``MotionFSM`` entirely: zoom must never become a mode and must never
+        disturb whichever pan/tilt mode is currently running.
+        """
+        if direction not in ("in", "out", "stop"):
+            raise ValueError(f"zoom direction must be 'in', 'out', or 'stop', got {direction!r}")
+        if self._loop is None:
+            self._set_pending_zoom(direction)
+            return
+        self._loop.call_soon_threadsafe(self._set_pending_zoom, direction)
+
+    def _set_pending_zoom(self, direction: str) -> None:
+        self._pending_zoom = direction
+        if self._wakeup is not None:
+            self._wakeup.set()
 
     # -- run loop ----------------------------------------------------------
 
@@ -298,6 +370,11 @@ class TickController:
             and result.mode != Mode.HOMING
         ):
             self._home_done_event.set()
+
+        # EO zoom: fully orthogonal to the FSM step above -- deliberately
+        # not routed through result.actions/MotionFSM (see module
+        # docstring's "EO zoom" section).
+        await self._drain_zoom(now)
 
         self._run_token_periodic(now)
 
@@ -438,6 +515,82 @@ class TickController:
         self._fsm.submit(Intent.stop(source="system:token_lost"), now)
         if self._wakeup is not None:
             self._wakeup.set()
+
+    # -- EO zoom: drain pending request + dead-man timer + slow DLTV poll --
+
+    async def _drain_zoom(self, now: float) -> None:
+        """Once per tick: send whatever zoom direction was requested since
+        the last tick, or -- if nothing new arrived and the lens is still
+        believed to be moving -- check the dead-man timer. Then (cheaply)
+        decide whether a DLTV poll is due. Never touches ``self._fsm``:
+        this is the whole point of keeping zoom orthogonal to pan/tilt."""
+        direction = self._pending_zoom
+        self._pending_zoom = None
+
+        if direction is not None:
+            await self._apply_zoom_command(direction, now)
+        elif self._zoom_active and self._zoom_deadline is not None and now >= self._zoom_deadline:
+            # MANDATORY SAFETY: no renewing "in"/"out" arrived in time --
+            # a dropped pointerup, a closed tab, a network blip -- stop the
+            # lens ourselves rather than let it drive to its mechanical
+            # limit unattended.
+            self._log.warn(
+                f"[flir_ptz] EO zoom dead-man timer expired ({self._zoom_deadman_s:.1f}s "
+                "without renewal) -- stopping zoom"
+            )
+            await self._apply_zoom_command("stop", now)
+
+        await self._maybe_poll_dltv(now)
+
+    async def _apply_zoom_command(self, direction: str, now: float) -> None:
+        try:
+            if direction == "in":
+                await self._session.zoom_in()
+            elif direction == "out":
+                await self._session.zoom_out()
+            else:  # "stop" -- always forwarded, even if we didn't think we were zooming
+                await self._session.zoom_stop()
+        except TokenLost as exc:
+            # Deliberately NOT the same bridge as _handle_token_lost: that
+            # submits an FSM Intent, and zoom must never touch fsm.mode.
+            # The camera-side lens state is now unknown to us; the safest
+            # local belief is "not actively renewing", so a stale dead-man
+            # timer can't fire a pointless extra stop later.
+            self._log.warn(f"[flir_ptz] EO zoom {direction!r} failed (token lost): {exc}")
+            self._zoom_active = False
+            self._zoom_deadline = None
+            return
+        except Exception as exc:
+            self._log.warn(f"[flir_ptz] EO zoom {direction!r} failed: {exc}")
+            return
+
+        self._token_tracker.note_command(now)
+        if direction == "stop":
+            self._zoom_active = False
+            self._zoom_deadline = None
+        else:
+            self._zoom_active = True
+            self._zoom_deadline = now + self._zoom_deadman_s
+        # Refresh the DLTV reading promptly so the UI reflects the change
+        # quickly, instead of waiting out the idle poll cadence.
+        self._dltv_poll_due = True
+
+    async def _maybe_poll_dltv(self, now: float) -> None:
+        due = (
+            self._dltv_poll_due
+            or self._last_dltv_poll_at is None
+            or (now - self._last_dltv_poll_at) >= self._zoom_poll_idle_s
+        )
+        if not due:
+            return
+        self._dltv_poll_due = False
+        self._last_dltv_poll_at = now
+        try:
+            sample = await self._session.read_dltv()
+        except Exception as exc:  # TokenLost can't occur here (read-only), but never risk the tick
+            self._log.warn(f"[flir_ptz] DLTV read failed: {exc}")
+            return
+        self._dltv_sample = sample
 
     def _publish_snapshot(self, sample: Optional[PtSample], result: StepResult) -> None:
         """Hand the tick's telemetry to the observer, defensively.

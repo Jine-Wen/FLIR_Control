@@ -53,11 +53,13 @@ from flir_ptz.nexus.protocol import (
     NEXUS_CGI,
     SESSION_SAVE,
     RC,
+    DltvSample,
     NexusError,
     PtSample,
     build_query,
     classify,
     normalize_base_url,
+    parse_dltv,
     parse_nmea,
     unwrap,
 )
@@ -605,6 +607,32 @@ class CameraSession:
 
     async def server_status(self) -> dict:
         return await self.execute("SERVERLastNMEAGet")
+
+    # -- EO (daylight) zoom (measured on a real 364C -- see worker brief) --
+    #
+    # DLTVZoomCountsIncrement/Decrement are CONTINUOUS: the lens keeps
+    # zooming until DLTVZoomStop arrives. None of these three end in "Get"
+    # and none start with "SERVERRemoteControl", so token.needs_token()'s
+    # deny-by-default rule correctly requires the control token for them --
+    # routed through execute() exactly like every PT command, so the same
+    # ACQUIRE/REVIVE/RELOGIN dance applies with no special-casing here.
+
+    async def zoom_in(self) -> None:
+        await self.execute("DLTVZoomCountsIncrement")
+
+    async def zoom_out(self) -> None:
+        await self.execute("DLTVZoomCountsDecrement")
+
+    async def zoom_stop(self) -> None:
+        await self.execute("DLTVZoomStop")
+
+    async def read_dltv(self) -> DltvSample:
+        """DLTVLastNMEAGet -- read-only (ends in "Get"), never needs the
+        token. Polled on a slow cadence by the controller (see
+        ``control/controller.py``'s zoom dead-man/poll logic) since the CGI
+        channel is a single serial resource shared with the PT read."""
+        payload = await self.execute("DLTVLastNMEAGet")
+        return parse_dltv(payload)
 
     async def has_control(self) -> bool:
         status = await self.execute("SERVERLastNMEAGet")

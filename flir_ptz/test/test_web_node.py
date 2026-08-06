@@ -207,6 +207,8 @@ def _fake_ptz_state(**overrides: Any) -> SimpleNamespace:
         is_scanning=False,
         active_move_seq=7,
         active_scan_seq=0,
+        zoom_pctg=18.59,
+        zoom_mm=41.75,
     )
     defaults.update(overrides)
     return SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=100, nanosec=250_000_000)), **defaults)
@@ -227,6 +229,8 @@ def test_ptz_state_msg_to_state_dict_matches_api_md_shape():
         "is_scanning": False,
         "active_move_seq": 7,
         "active_scan_seq": 0,
+        "zoom_pctg": 18.59,
+        "zoom_mm": 41.75,
         "stamp": 100.25,
     }
 
@@ -508,6 +512,14 @@ class _NodeLikeAdapter:
         self.published.append(("scan", {"stop": stop, "source": source}))
         return {"ok": True, "stop": stop}
 
+    def cmd_zoom(self, body: dict) -> dict:
+        direction = web_node.normalize_zoom_direction(str(body.get("direction", "stop")))
+        source = str(body.get("source") or web_node.DEFAULT_SOURCE)
+        if not self._allowed(source, is_stop=direction == "stop"):
+            return {"ok": False, "locked": self.control_source.get("owner", ""), "direction": direction}
+        self.published.append(("zoom", {"direction": direction, "source": source}))
+        return {"ok": True, "direction": direction}
+
     def cmd_home(self, body: dict) -> dict:
         source = str(body.get("source") or web_node.DEFAULT_SOURCE)
         if not self._allowed(source, is_stop=False):
@@ -780,6 +792,50 @@ def test_cmd_scan_start_locked_when_joy_holds_lease():
     adapter.push_control_source("joy", time.time() + 60.0)
     resp = adapter.cmd_scan({"stop": False, "center_azimuth": 0.0, "source": "web"})
     assert resp == {"ok": False, "locked": "joy", "stop": False}
+
+
+def test_normalize_zoom_direction_passes_through_in_and_out():
+    assert web_node.normalize_zoom_direction("in") == "in"
+    assert web_node.normalize_zoom_direction("out") == "out"
+
+
+def test_normalize_zoom_direction_fails_safe_to_stop():
+    """The lens is CONTINUOUS -- an unrecognised value must never be
+    silently dropped (which for zoom would mean "leave the lens running"),
+    so it degrades to the one direction that is always safe: stop."""
+    assert web_node.normalize_zoom_direction("stop") == "stop"
+    assert web_node.normalize_zoom_direction("") == "stop"
+    assert web_node.normalize_zoom_direction("sideways") == "stop"
+    assert web_node.normalize_zoom_direction(None) == "stop"
+
+
+def test_cmd_zoom_accepted_when_lease_is_unclaimed():
+    adapter = _NodeLikeAdapter()
+    resp = adapter.cmd_zoom({"direction": "in", "source": "web"})
+    assert resp == {"ok": True, "direction": "in"}
+    assert adapter.published[-1] == ("zoom", {"direction": "in", "source": "web"})
+
+
+def test_cmd_zoom_in_locked_when_joy_holds_lease():
+    adapter = _NodeLikeAdapter()
+    adapter.push_control_source("joy", time.time() + 60.0)
+    resp = adapter.cmd_zoom({"direction": "in", "source": "web"})
+    assert resp == {"ok": False, "locked": "joy", "direction": "in"}
+    assert adapter.published == []
+
+
+def test_cmd_zoom_stop_always_allowed_even_when_locked_by_other():
+    adapter = _NodeLikeAdapter()
+    adapter.push_control_source("joy", time.time() + 60.0)
+    resp = adapter.cmd_zoom({"direction": "stop", "source": "web"})
+    assert resp == {"ok": True, "direction": "stop"}
+
+
+def test_cmd_zoom_unrecognised_direction_treated_as_stop_and_always_allowed():
+    adapter = _NodeLikeAdapter()
+    adapter.push_control_source("joy", time.time() + 60.0)
+    resp = adapter.cmd_zoom({"direction": "sideways", "source": "web"})
+    assert resp == {"ok": True, "direction": "stop"}
 
 
 def test_cmd_home_uses_control_config_home_position():

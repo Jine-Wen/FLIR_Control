@@ -38,6 +38,19 @@ def test_needs_token_writes_require_token():
     assert needs_token("PTAutoScanSetSpeed") is True
 
 
+def test_needs_token_eo_zoom_commands():
+    """The exact gap this module's deny-by-default rewrite exists to close
+    (see module docstring): the continuous EO zoom commands drive hardware
+    just like a PT*Set command, and must require the token even though they
+    don't match the old ``PT*`` allowlist shape at all."""
+    assert needs_token("DLTVZoomCountsIncrement") is True
+    assert needs_token("DLTVZoomCountsDecrement") is True
+    assert needs_token("DLTVZoomStop") is True
+    # The read that reports zoom/focus telemetry stays free, same as every
+    # other "*Get" action.
+    assert needs_token("DLTVLastNMEAGet") is False
+
+
 # -- observe_token_id / required_before ---------------------------------
 
 

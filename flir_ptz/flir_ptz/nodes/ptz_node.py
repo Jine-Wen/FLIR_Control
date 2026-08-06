@@ -24,8 +24,16 @@ Publishes: flir/ptz/state      (PtzState, depth 10)
            flir/camera_status  (String JSON, latched)   -- PARITY A2/A28
            flir/control_source (ControlSource, latched) -- arbitration broadcast
 Subscribes: flir/cmd/move_to, flir/cmd/track, flir/cmd/joy_stick_control,
-            flir/cmd/scan, flir/camera_config
+            flir/cmd/scan, flir/cmd/zoom, flir/camera_config
 Service:   flir/claim_control (ClaimControl)
+
+EO (daylight) zoom is arbitrated through the same lease as pan/tilt (a
+``ZoomCmd`` with ``direction == "stop"`` is a stop command and is therefore
+ALWAYS accepted, exactly like a zero-speed joystick or ``scan(stop=true)``),
+but it is deliberately NOT dispatched as a ``MotionFSM`` ``Intent``: zoom is
+orthogonal to pan/tilt (spec worker brief), so it goes through the
+controller's separate ``submit_zoom()`` path (see ``control/controller.py``)
+instead of ``submit_threadsafe(intent)``.
 
 Every credential parameter defaults to the empty string (spec sec. 8
 rule 1) -- real values only ever come from a gitignored local YAML file,
@@ -41,7 +49,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import rclpy
 from rclpy.duration import Duration
@@ -54,14 +62,14 @@ from rclpy.qos import (
 )
 from std_msgs.msg import String
 
-from flir_ptz_msgs.msg import ControlSource, JoyStickControlCmd, MoveToCmd, PtzState, ScanCmd
+from flir_ptz_msgs.msg import ControlSource, JoyStickControlCmd, MoveToCmd, PtzState, ScanCmd, ZoomCmd
 from flir_ptz_msgs.srv import ClaimControl
 
 from flir_ptz.control.arbitration import Arbiter
 from flir_ptz.control.config import CameraConfig, ControlConfig, load_camera_config
 from flir_ptz.control.controller import TickController
 from flir_ptz.control.fsm import Intent, Mode, MotionFSM, StepResult
-from flir_ptz.nexus.protocol import PtSample
+from flir_ptz.nexus.protocol import DltvSample, PtSample
 from flir_ptz.nexus.session import CameraSession, NotConfigured
 from flir_ptz.nexus.token import TokenPolicy
 
@@ -137,6 +145,7 @@ class FlirPtzNode(Node):
             JoyStickControlCmd, "flir/cmd/joy_stick_control", self._on_joy_stick_control, 5
         )
         self.create_subscription(ScanCmd, "flir/cmd/scan", self._on_scan, 5)
+        self.create_subscription(ZoomCmd, "flir/cmd/zoom", self._on_zoom, 5)
         self.create_subscription(String, "flir/camera_config", self._on_config, 5)
 
         # -- service (PARITY C17) -----------------------------------------
@@ -426,7 +435,16 @@ class FlirPtzNode(Node):
         msg.is_scanning = result.is_scanning
         msg.active_move_seq = result.seq
         msg.active_scan_seq = result.seq
+
+        zoom = self._zoom_snapshot()
+        msg.zoom_pctg = zoom.zoom_pctg if zoom is not None else 0.0
+        msg.zoom_mm = zoom.zoom if zoom is not None else 0.0
+
         self._publish_best_effort(self._state_pub, msg)
+
+    def _zoom_snapshot(self) -> Optional[DltvSample]:
+        controller = self._controller_ref()
+        return controller.zoom_state if controller is not None else None
 
     @staticmethod
     def _publish_best_effort(publisher, msg) -> None:
@@ -500,6 +518,21 @@ class FlirPtzNode(Node):
             return self._controller
 
     def _submit_if_allowed(self, source: str, is_stop: bool, intent: Intent, label: str) -> None:
+        self._arbitrate(source, is_stop, label, lambda controller: controller.submit_threadsafe(intent))
+
+    def _arbitrate(
+        self, source: str, is_stop: bool, label: str, dispatch: Callable[[TickController], None]
+    ) -> None:
+        """Shared arbitration bookkeeping for every command subscription.
+
+        ``dispatch(controller)`` is whatever actually hands the command to
+        the tick loop -- ``controller.submit_threadsafe(intent)`` for
+        pan/tilt/scan (an ``Intent``, via ``MotionFSM``), or
+        ``controller.submit_zoom(direction)`` for zoom, which is
+        deliberately NOT an ``Intent``/FSM mode (see module docstring).
+        Arbitration itself -- who is allowed to command the camera right
+        now -- does not care which of those it is.
+        """
         now = self._clock_fn()
         if not self._arbiter.allows(source, is_stop, now):
             self.get_logger().debug(
@@ -525,7 +558,7 @@ class FlirPtzNode(Node):
         if controller is None:
             self.get_logger().warn(f"[flir_ptz] dropping {label}: camera not connected yet")
             return
-        controller.submit_threadsafe(intent)
+        dispatch(controller)
 
     def _on_move_to(self, msg: MoveToCmd) -> None:
         self._submit_if_allowed(
@@ -558,6 +591,21 @@ class FlirPtzNode(Node):
                 Intent.scan_start(msg.center_azimuth, msg.each_side_deg, msg.elevation, msg.speed, msg.source),
                 "scan(start)",
             )
+
+    def _on_zoom(self, msg: ZoomCmd) -> None:
+        # Fail safe: any value other than "in"/"out" (including empty,
+        # malformed, or an unrecognised string) is treated as "stop" --
+        # never as "do nothing", which for a CONTINUOUS zoom could leave the
+        # lens driving unattended with no way to reach it. "stop" is
+        # therefore ALWAYS accepted regardless of who owns the lease, the
+        # same non-negotiable safety rule as a zero-speed joystick or
+        # scan(stop=true).
+        direction = msg.direction if msg.direction in ("in", "out") else "stop"
+        is_stop = direction == "stop"
+        self._arbitrate(
+            msg.source, is_stop, f"zoom({direction})",
+            lambda controller: controller.submit_zoom(direction),
+        )
 
     # -- dynamic reconfiguration (PARITY A23) ---------------------------------
 

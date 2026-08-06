@@ -16,7 +16,15 @@ import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_WEB = os.path.join(os.path.dirname(_HERE), "flir_ptz", "web")
+_PKG_ROOT = os.path.dirname(_HERE)
+_WEB = os.path.join(_PKG_ROOT, "flir_ptz", "web")
+
+# Must be self-sufficient. Without this the file only passed when some other
+# test module happened to be imported first and had already put the package
+# root on sys.path -- so running this file alone failed, and its guards were
+# silently order-dependent.
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
 import pytest  # noqa: E402
 

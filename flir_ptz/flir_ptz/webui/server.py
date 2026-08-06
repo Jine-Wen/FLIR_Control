@@ -136,6 +136,11 @@ class WebAdapter(Protocol):
 
     def cmd_scan(self, body: dict[str, Any]) -> dict[str, Any]: ...
 
+    def cmd_zoom(self, body: dict[str, Any]) -> dict[str, Any]:
+        """EO (daylight) lens zoom -- ``body["direction"]`` is ``"in"`` |
+        ``"out"`` | ``"stop"``. IR has no equivalent zoom."""
+        ...
+
     def cmd_home(self, body: dict[str, Any]) -> dict[str, Any]: ...
 
     # -- control-source arbitration (API.md sec. 4) ------------------------
@@ -397,6 +402,9 @@ def make_server(
                 return
             if path == "/api/cmd/scan":
                 self._send_json(adapter.cmd_scan(body))
+                return
+            if path == "/api/cmd/zoom":
+                self._send_json(adapter.cmd_zoom(body))
                 return
             if path == "/api/cmd/home":
                 self._send_json(adapter.cmd_home(body))

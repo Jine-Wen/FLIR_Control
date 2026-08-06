@@ -10,6 +10,7 @@ Publishes:  flir/cmd/move_to             (flir_ptz_msgs/MoveToCmd)
             flir/cmd/track                (flir_ptz_msgs/MoveToCmd)
             flir/cmd/joy_stick_control    (flir_ptz_msgs/JoyStickControlCmd)
             flir/cmd/scan                 (flir_ptz_msgs/ScanCmd)
+            flir/cmd/zoom                  (flir_ptz_msgs/ZoomCmd)  -- EO only
             flir/camera_config             (std_msgs/String JSON)
 
 This node is a thin ROS shell around the stdlib-only HTTP/SSE server in
@@ -165,6 +166,8 @@ def ptz_state_msg_to_state_dict(msg: Any) -> dict[str, Any]:
         "is_scanning": msg.is_scanning,
         "active_move_seq": msg.active_move_seq,
         "active_scan_seq": msg.active_scan_seq,
+        "zoom_pctg": msg.zoom_pctg,
+        "zoom_mm": msg.zoom_mm,
         "stamp": stamp,
     }
 
@@ -282,6 +285,14 @@ def is_zero_speed(az_speed: float, el_speed: float) -> bool:
     return az_speed == 0.0 and el_speed == 0.0
 
 
+def normalize_zoom_direction(direction: Any) -> str:
+    """Fail safe, same rule as ``nodes/ptz_node.py``'s ``_on_zoom``: any
+    value other than ``"in"``/``"out"`` -- missing, malformed, or simply
+    unrecognised -- becomes ``"stop"``. The lens is CONTINUOUS, so "do
+    nothing" is never a safe default for a value we don't understand."""
+    return direction if direction in ("in", "out") else "stop"
+
+
 def to_float(value: Any, default: float) -> float:
     """Best-effort ``float(value)`` that never raises -- POST bodies are
     untrusted JSON and may contain any type."""
@@ -357,7 +368,7 @@ try:
     )
     from std_msgs.msg import String
 
-    from flir_ptz_msgs.msg import ControlSource, JoyStickControlCmd, MoveToCmd, PtzState, ScanCmd
+    from flir_ptz_msgs.msg import ControlSource, JoyStickControlCmd, MoveToCmd, PtzState, ScanCmd, ZoomCmd
     from flir_ptz_msgs.srv import ClaimControl
 
     _ROS_AVAILABLE = True
@@ -414,6 +425,7 @@ if _ROS_AVAILABLE:
             self._track_pub = self.create_publisher(MoveToCmd, "flir/cmd/track", 10)
             self._joy_pub = self.create_publisher(JoyStickControlCmd, "flir/cmd/joy_stick_control", 10)
             self._scan_pub = self.create_publisher(ScanCmd, "flir/cmd/scan", 10)
+            self._zoom_pub = self.create_publisher(ZoomCmd, "flir/cmd/zoom", 10)
             self._config_pub = self.create_publisher(String, "flir/camera_config", 5)
 
             self.create_subscription(PtzState, "flir/ptz/state", self._on_state, 10)
@@ -593,6 +605,17 @@ if _ROS_AVAILABLE:
             msg.source = source
             self._scan_pub.publish(msg)
             return {"ok": True, "stop": stop}
+
+        def cmd_zoom(self, body: dict[str, Any]) -> dict[str, Any]:
+            direction = normalize_zoom_direction(str(body.get("direction", "stop")))
+            source = str(body.get("source") or DEFAULT_SOURCE)
+            if not self._allowed(source, is_stop=direction == "stop"):
+                return self._locked_response({"direction": direction})
+            msg = ZoomCmd()
+            msg.direction = direction
+            msg.source = source
+            self._zoom_pub.publish(msg)
+            return {"ok": True, "direction": direction}
 
         def cmd_home(self, body: dict[str, Any]) -> dict[str, Any]:
             source = str(body.get("source") or DEFAULT_SOURCE)

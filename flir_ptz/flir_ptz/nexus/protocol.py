@@ -233,3 +233,27 @@ def parse_nmea(payload: dict) -> PtSample:
         speed_y=float(payload.get("Speed_Y", 0.0)),
         mode=int(payload.get("Mode", 0)),
     )
+
+
+@dataclass(frozen=True)
+class DltvSample:
+    """A single parsed DLTVLastNMEAGet sample -- EO (daylight) lens zoom/focus
+    telemetry. Measured on a real FLIR 364C: ``Zoom`` is the lens focal
+    length in mm (e.g. 41.75), ``Zoom_pctg`` is percent of zoom travel (e.g.
+    18.59), ``Focus_pctg`` is percent of focus travel, and ``Autofocus`` is
+    the camera's autofocus state flag."""
+
+    zoom: float
+    zoom_pctg: float
+    focus_pctg: float
+    autofocus: float
+
+
+def parse_dltv(payload: dict) -> DltvSample:
+    """Parse a DLTVLastNMEAGet-shaped payload; missing fields default to 0."""
+    return DltvSample(
+        zoom=float(payload.get("Zoom", 0.0)),
+        zoom_pctg=float(payload.get("Zoom_pctg", 0.0)),
+        focus_pctg=float(payload.get("Focus_pctg", 0.0)),
+        autofocus=float(payload.get("Autofocus", 0.0)),
+    )

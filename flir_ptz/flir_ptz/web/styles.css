@@ -322,6 +322,33 @@ button, input { font: inherit; }
   text-overflow: ellipsis;
 }
 
+/* EO-only zoom controls -- press-and-hold, see app.js wireZoomControls(). */
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 7px 13px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.zoom-controls button {
+  flex: 0 0 auto;
+  padding: 6px 16px;
+  touch-action: none;   /* a held press must not trigger scroll/zoom gestures */
+  user-select: none;
+}
+.zoom-readout {
+  min-width: 3.4em;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .82rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--navy-800);
+}
+.zoom-readout .unit { font-size: .64rem; color: var(--muted); margin-left: 1px; }
+
 /* ── Control sidebar ───────────────────────────────────────────────────── */
 .control-stack {
   display: flex;

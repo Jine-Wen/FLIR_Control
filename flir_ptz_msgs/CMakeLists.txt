@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MoveToCmd.msg"
   "msg/JoyStickControlCmd.msg"
   "msg/ScanCmd.msg"
+  "msg/ZoomCmd.msg"
   "msg/ControlSource.msg"
   "srv/ClaimControl.srv"
   DEPENDENCIES std_msgs builtin_interfaces

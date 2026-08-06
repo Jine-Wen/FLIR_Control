@@ -13,3 +13,6 @@ bool    is_moving        # True while move_to closed-loop is active
 bool    is_scanning      # True while auto-scan mode is active
 int32   active_move_seq  # Sequence number of current move command
 int32   active_scan_seq  # Sequence number of current scan command
+
+float64 zoom_pctg        # EO lens zoom, percent of travel (DLTVLastNMEAGet Zoom_pctg); 0 if unknown/IR-only
+float64 zoom_mm           # EO lens focal length, mm (DLTVLastNMEAGet Zoom); 0 if unknown/IR-only

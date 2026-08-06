@@ -34,10 +34,13 @@ const ui = {
   videoGrid:  $("videoGrid"),
   camDisconnectWarn:     $("camDisconnectWarn"),
   camDisconnectWarnText: $("camDisconnectWarnText"),
+  eoZoomIn:   $("eoZoomIn"),
+  eoZoomOut:  $("eoZoomOut"),
+  eoZoomPctg: $("eoZoomPctg"),
 };
 
 // Buttons that must be disabled when locked
-const CTRL_BUTTONS = ["moveButton", "centerButton", "homeButton", "scanStart", "scanStop"];
+const CTRL_BUTTONS = ["moveButton", "centerButton", "homeButton", "scanStart", "scanStop", "eoZoomIn", "eoZoomOut"];
 const CTRL_PANELS  = ["movePanel", "scanPanel"];
 
 let joy = { active: false, x: 0, y: 0 };
@@ -468,6 +471,8 @@ function renderState(payload) {
   diffStyle(ui.barX, "barX", "width", px);
   diffStyle(ui.barY, "barY", "width", py);
 
+  diffText(ui.eoZoomPctg, "eoZoomPctg", fmt(s.zoom_pctg, 1));
+
   applyModel(payload.model, payload.streams);
   applyControlSource(payload.control_source);
 }
@@ -634,9 +639,66 @@ function wireControls() {
   });
 }
 
+/* ── EO zoom: press-and-hold ────────────────────────────────────────
+   The lens is CONTINUOUS -- one "in"/"out" keeps it moving until a "stop"
+   arrives (control/controller.py runs a matching dead-man timer server-side
+   as a last-resort safety net, but the browser must still behave: resend
+   the held direction periodically so that timer never has a reason to
+   fire, and send "stop" the instant the hold ends for any reason —
+   pointerup, pointercancel, pointerleave, the tab going hidden, or the
+   page being torn down entirely.
+*/
+const ZOOM_RESEND_MS = 400;
+let zoomHoldTimer = null;
+let zoomHoldDirection = null;
+
+function sendZoom(direction) {
+  post("/api/cmd/zoom", { direction });
+}
+
+function stopZoomHold() {
+  if (zoomHoldTimer) { clearInterval(zoomHoldTimer); zoomHoldTimer = null; }
+  if (zoomHoldDirection) {
+    zoomHoldDirection = null;
+    sendZoom("stop");
+  }
+}
+
+function startZoomHold(direction) {
+  stopZoomHold();
+  zoomHoldDirection = direction;
+  sendZoom(direction);
+  // Keep renewing while held so the server-side dead-man timer never fires
+  // for a genuinely-held button.
+  zoomHoldTimer = setInterval(() => sendZoom(direction), ZOOM_RESEND_MS);
+}
+
+function wireZoomControls() {
+  const buttons = [[ui.eoZoomIn, "in"], [ui.eoZoomOut, "out"]];
+  for (const [btn, direction] of buttons) {
+    if (!btn) continue;
+    btn.addEventListener("pointerdown", (evt) => {
+      if (btn.disabled) return;
+      btn.setPointerCapture(evt.pointerId);
+      startZoomHold(direction);
+    });
+    btn.addEventListener("pointerup",     stopZoomHold);
+    btn.addEventListener("pointercancel", stopZoomHold);
+    btn.addEventListener("pointerleave",  stopZoomHold);
+  }
+
+  // Closing/backgrounding the tab, or losing focus entirely, must not
+  // leave the lens running with nobody watching.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") stopZoomHold();
+  });
+  window.addEventListener("pagehide", stopZoomHold);
+}
+
 /* ── Boot ───────────────────────────────────────────────────────── */
 wireJoystick();
 wireControls();
+wireZoomControls();
 connectEvents();
 setInterval(publishJoyStickControl, 100);  // ~10Hz joystick command send loop while dragging
 setJoyLock(true);  // start locked

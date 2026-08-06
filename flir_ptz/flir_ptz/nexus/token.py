@@ -66,13 +66,27 @@ _READ_ONLY_ACTIONS = frozenset(
 def needs_token(action: str) -> bool:
     """Return True if ``action`` (a Nexus command name) requires the token.
 
-    Read commands (``PTLastNMEAGet`` / ``SERVERLastNMEAGet`` /
-    ``SERVERWhoAmI``) never need it; every ``PT*Set`` / ``PTAutoScan*``
-    command does.
+    The rule is *deny by default*: anything that is not demonstrably a read,
+    or part of acquiring the token itself, is assumed to change the camera and
+    therefore needs control.
+
+    This used to be an allowlist -- ``action.startswith("PT") and ("Set" in
+    action or ...)`` -- which silently classified every non-PT device command
+    as harmless. The EO lens commands (``DLTVZoomCountsIncrement`` and friends)
+    fall into exactly that gap: they drive hardware, but would have been sent
+    without ever acquiring the token, and the camera rejects them. An allowlist
+    fails open every time the device surface grows, which is the wrong
+    direction for a rule about who is permitted to move hardware.
     """
     if action in _READ_ONLY_ACTIONS:
         return False
-    return action.startswith("PT") and ("Set" in action or action.startswith("PTAutoScan"))
+    # `*Get` is the protocol's own naming convention for a read.
+    if action.endswith("Get"):
+        return False
+    # Acquiring or releasing the token cannot itself require the token.
+    if action.startswith("SERVERRemoteControl"):
+        return False
+    return True
 
 
 class TokenTracker:
