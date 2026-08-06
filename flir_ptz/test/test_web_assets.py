@@ -206,3 +206,50 @@ def test_semantic_colours_meet_wcag_aa_on_both_surfaces(token):
             f"{token} ({colour}) on {surface} ({values[surface]}) "
             f"is {ratio:.2f}:1, below the 4.5:1 AA threshold"
         )
+
+
+# ── the unlock gesture must remain reachable while locked ────────────────────
+#
+# The worst regression of the redesign, and the least visible: setJoyLock(true)
+# marks EVERY panel ctrl-locked at boot, including #joyPanel — yet the only way
+# to unlock the console is to draw a circle ON the joystick. Letting #joyPanel
+# inherit `pointer-events: none` makes that gesture impossible, so nothing ever
+# unlocks and the whole control sidebar is dead for the session. No error, no
+# log, no visual cue that anything is wrong.
+
+
+def test_locked_joystick_panel_still_accepts_pointer_events():
+    body = _rule_body("#joyPanel.ctrl-locked")
+    assert "pointer-events: auto" in body, (
+        "#joyPanel must stay interactive while locked, or the circle-to-unlock "
+        "gesture can never be performed and the console deadlocks"
+    )
+
+
+def test_generic_panel_lock_does_block_pointer_events():
+    """The exception above only means anything if the general rule still bites."""
+    assert "pointer-events: none" in _rule_body(".panel.ctrl-locked")
+
+
+def test_locked_joystick_panel_still_disables_its_inputs():
+    """Interactive ring, inert controls: the speed slider must not be
+    adjustable while the console is locked."""
+    assert "pointer-events: none" in _rule_body("#joyPanel.ctrl-locked .field")
+
+
+def test_joystick_panel_is_not_dimmed_while_locked():
+    """It is the affordance the operator must find and use; dimming it to .5
+    alongside the dead panels hides the one thing that still works."""
+    assert "opacity: 1" in _rule_body("#joyPanel.ctrl-locked")
+
+
+def test_every_panel_setjoylock_touches_is_locked_by_the_same_class():
+    """setJoyLock adds .ctrl-locked to CTRL_PANELS plus #joyPanel explicitly.
+    If a new panel is added to that list, it needs styling too."""
+    m = re.search(r"const CTRL_PANELS\s*=\s*\[([^\]]*)\]", APP_JS)
+    assert m, "app.js no longer declares CTRL_PANELS"
+    panels = re.findall(r'"([A-Za-z0-9_-]+)"', m.group(1))
+    assert panels, "CTRL_PANELS is empty"
+    for pid in panels:
+        assert f'id="{pid}"' in INDEX, f"CTRL_PANELS names #{pid}, absent from the markup"
+    assert 'id="joyPanel"' in INDEX
