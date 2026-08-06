@@ -27,13 +27,16 @@ Subscribes: flir/cmd/move_to, flir/cmd/track, flir/cmd/joy_stick_control,
             flir/cmd/scan, flir/cmd/zoom, flir/camera_config
 Service:   flir/claim_control (ClaimControl)
 
-EO (daylight) zoom is arbitrated through the same lease as pan/tilt (a
-``ZoomCmd`` with ``direction == "stop"`` is a stop command and is therefore
-ALWAYS accepted, exactly like a zero-speed joystick or ``scan(stop=true)``),
-but it is deliberately NOT dispatched as a ``MotionFSM`` ``Intent``: zoom is
-orthogonal to pan/tilt (spec worker brief), so it goes through the
-controller's separate ``submit_zoom()`` path (see ``control/controller.py``)
-instead of ``submit_threadsafe(intent)``.
+EO (daylight) and IR (thermal) zoom are both arbitrated through the same
+lease as pan/tilt (a ``ZoomCmd`` with ``direction == "stop"`` is a stop
+command and is therefore ALWAYS accepted, exactly like a zero-speed
+joystick or ``scan(stop=true)``, for BOTH devices), but neither is
+dispatched as a ``MotionFSM`` ``Intent``: zoom is orthogonal to pan/tilt
+(spec worker brief), so it goes through the controller's separate
+``submit_zoom(direction, device)`` path (see ``control/controller.py``)
+instead of ``submit_threadsafe(intent)``. ``ZoomCmd.device`` (``"eo"`` |
+``"ir"``) selects which lens; absent or unrecognised defaults to ``"eo"``
+so existing publishers that never set it keep working unchanged.
 
 Every credential parameter defaults to the empty string (spec sec. 8
 rule 1) -- real values only ever come from a gitignored local YAML file,
@@ -69,7 +72,7 @@ from flir_ptz.control.arbitration import Arbiter
 from flir_ptz.control.config import CameraConfig, ControlConfig, load_camera_config
 from flir_ptz.control.controller import TickController
 from flir_ptz.control.fsm import Intent, Mode, MotionFSM, StepResult
-from flir_ptz.nexus.protocol import DltvSample, PtSample
+from flir_ptz.nexus.protocol import DltvSample, IrSample, PtSample
 from flir_ptz.nexus.session import CameraSession, NotConfigured
 from flir_ptz.nexus.token import TokenPolicy
 
@@ -440,11 +443,19 @@ class FlirPtzNode(Node):
         msg.zoom_pctg = zoom.zoom_pctg if zoom is not None else 0.0
         msg.zoom_mm = zoom.zoom if zoom is not None else 0.0
 
+        ir_zoom = self._ir_zoom_snapshot()
+        msg.ir_zoom_pctg = ir_zoom.zoom_pctg if ir_zoom is not None else 0.0
+        msg.ir_fov = ir_zoom.fov if ir_zoom is not None else 0.0
+
         self._publish_best_effort(self._state_pub, msg)
 
     def _zoom_snapshot(self) -> Optional[DltvSample]:
         controller = self._controller_ref()
         return controller.zoom_state if controller is not None else None
+
+    def _ir_zoom_snapshot(self) -> Optional[IrSample]:
+        controller = self._controller_ref()
+        return controller.ir_zoom_state if controller is not None else None
 
     @staticmethod
     def _publish_best_effort(publisher, msg) -> None:
@@ -599,12 +610,15 @@ class FlirPtzNode(Node):
         # lens driving unattended with no way to reach it. "stop" is
         # therefore ALWAYS accepted regardless of who owns the lease, the
         # same non-negotiable safety rule as a zero-speed joystick or
-        # scan(stop=true).
+        # scan(stop=true) -- for BOTH devices.
         direction = msg.direction if msg.direction in ("in", "out") else "stop"
         is_stop = direction == "stop"
+        # device defaults to "eo" when absent or unrecognised, so existing
+        # publishers that never set ZoomCmd.device keep working unchanged.
+        device = msg.device if msg.device in ("eo", "ir") else "eo"
         self._arbitrate(
-            msg.source, is_stop, f"zoom({direction})",
-            lambda controller: controller.submit_zoom(direction),
+            msg.source, is_stop, f"zoom({device}:{direction})",
+            lambda controller: controller.submit_zoom(direction, device),
         )
 
     # -- dynamic reconfiguration (PARITY A23) ---------------------------------

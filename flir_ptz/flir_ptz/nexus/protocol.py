@@ -257,3 +257,36 @@ def parse_dltv(payload: dict) -> DltvSample:
         focus_pctg=float(payload.get("Focus_pctg", 0.0)),
         autofocus=float(payload.get("Autofocus", 0.0)),
     )
+
+
+@dataclass(frozen=True)
+class IrSample:
+    """A single parsed IRLastNMEAGet sample -- IR (thermal) lens zoom
+    telemetry. Measured on a real FLIR 364C: ``FOV`` is the field of view in
+    degrees (e.g. 11.67), ``Zoom_Pctg`` is percent of zoom travel -- unlike
+    EO's continuous readout, IR is quantised to multiples of 6.25 (e.g.
+    25.0 / 31.25 / 37.5) -- and ``FOV_Index`` is the discrete FOV step index.
+
+    *** CAPITALISATION TRAP (measured on hardware) ***: DLTV (EO) reports
+    ``Zoom_pctg`` (lower-case p); IR reports ``Zoom_Pctg`` (upper-case P).
+    Reusing :func:`parse_dltv` verbatim for IR reads nothing and silently
+    yields 0.0 -- that is exactly why IR gets its own dataclass and parse
+    function instead of sharing :class:`DltvSample`/:func:`parse_dltv`.
+    """
+
+    fov: float
+    zoom_pctg: float
+    fov_index: int
+
+
+def parse_ir(payload: dict) -> IrSample:
+    """Parse an IRLastNMEAGet-shaped payload; missing fields default to 0.
+
+    Deliberately reads ``Zoom_Pctg`` (capital P) -- see :class:`IrSample`'s
+    docstring for the capitalisation trap this exists to avoid.
+    """
+    return IrSample(
+        fov=float(payload.get("FOV", 0.0)),
+        zoom_pctg=float(payload.get("Zoom_Pctg", 0.0)),
+        fov_index=int(payload.get("FOV_Index", 0)),
+    )

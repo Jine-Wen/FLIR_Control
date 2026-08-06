@@ -137,8 +137,12 @@ class WebAdapter(Protocol):
     def cmd_scan(self, body: dict[str, Any]) -> dict[str, Any]: ...
 
     def cmd_zoom(self, body: dict[str, Any]) -> dict[str, Any]:
-        """EO (daylight) lens zoom -- ``body["direction"]`` is ``"in"`` |
-        ``"out"`` | ``"stop"``. IR has no equivalent zoom."""
+        """EO (daylight) or IR (thermal) lens zoom -- ``body["direction"]``
+        is ``"in"`` | ``"out"`` | ``"stop"`` and ``body["device"]`` is
+        ``"eo"`` | ``"ir"`` (absent/unrecognised defaults to ``"eo"``).
+        This module never inspects ``device`` itself -- it is opaque body
+        content forwarded verbatim to the adapter, exactly like every other
+        POST field (see the route table below)."""
         ...
 
     def cmd_home(self, body: dict[str, Any]) -> dict[str, Any]: ...

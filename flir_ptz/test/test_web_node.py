@@ -209,6 +209,8 @@ def _fake_ptz_state(**overrides: Any) -> SimpleNamespace:
         active_scan_seq=0,
         zoom_pctg=18.59,
         zoom_mm=41.75,
+        ir_zoom_pctg=31.25,
+        ir_fov=11.67,
     )
     defaults.update(overrides)
     return SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=100, nanosec=250_000_000)), **defaults)
@@ -231,6 +233,8 @@ def test_ptz_state_msg_to_state_dict_matches_api_md_shape():
         "active_scan_seq": 0,
         "zoom_pctg": 18.59,
         "zoom_mm": 41.75,
+        "ir_zoom_pctg": 31.25,
+        "ir_fov": 11.67,
         "stamp": 100.25,
     }
 
@@ -514,11 +518,12 @@ class _NodeLikeAdapter:
 
     def cmd_zoom(self, body: dict) -> dict:
         direction = web_node.normalize_zoom_direction(str(body.get("direction", "stop")))
+        device = web_node.normalize_zoom_device(str(body.get("device", "eo")))
         source = str(body.get("source") or web_node.DEFAULT_SOURCE)
         if not self._allowed(source, is_stop=direction == "stop"):
-            return {"ok": False, "locked": self.control_source.get("owner", ""), "direction": direction}
-        self.published.append(("zoom", {"direction": direction, "source": source}))
-        return {"ok": True, "direction": direction}
+            return {"ok": False, "locked": self.control_source.get("owner", ""), "direction": direction, "device": device}
+        self.published.append(("zoom", {"direction": direction, "device": device, "source": source}))
+        return {"ok": True, "direction": direction, "device": device}
 
     def cmd_home(self, body: dict) -> dict:
         source = str(body.get("source") or web_node.DEFAULT_SOURCE)
@@ -812,15 +817,15 @@ def test_normalize_zoom_direction_fails_safe_to_stop():
 def test_cmd_zoom_accepted_when_lease_is_unclaimed():
     adapter = _NodeLikeAdapter()
     resp = adapter.cmd_zoom({"direction": "in", "source": "web"})
-    assert resp == {"ok": True, "direction": "in"}
-    assert adapter.published[-1] == ("zoom", {"direction": "in", "source": "web"})
+    assert resp == {"ok": True, "direction": "in", "device": "eo"}
+    assert adapter.published[-1] == ("zoom", {"direction": "in", "device": "eo", "source": "web"})
 
 
 def test_cmd_zoom_in_locked_when_joy_holds_lease():
     adapter = _NodeLikeAdapter()
     adapter.push_control_source("joy", time.time() + 60.0)
     resp = adapter.cmd_zoom({"direction": "in", "source": "web"})
-    assert resp == {"ok": False, "locked": "joy", "direction": "in"}
+    assert resp == {"ok": False, "locked": "joy", "direction": "in", "device": "eo"}
     assert adapter.published == []
 
 
@@ -828,14 +833,42 @@ def test_cmd_zoom_stop_always_allowed_even_when_locked_by_other():
     adapter = _NodeLikeAdapter()
     adapter.push_control_source("joy", time.time() + 60.0)
     resp = adapter.cmd_zoom({"direction": "stop", "source": "web"})
-    assert resp == {"ok": True, "direction": "stop"}
+    assert resp == {"ok": True, "direction": "stop", "device": "eo"}
 
 
 def test_cmd_zoom_unrecognised_direction_treated_as_stop_and_always_allowed():
     adapter = _NodeLikeAdapter()
     adapter.push_control_source("joy", time.time() + 60.0)
     resp = adapter.cmd_zoom({"direction": "sideways", "source": "web"})
-    assert resp == {"ok": True, "direction": "stop"}
+    assert resp == {"ok": True, "direction": "stop", "device": "eo"}
+
+
+# -- device: carried through /api/cmd/zoom, defaulting to "eo" ---------------
+
+
+def test_normalize_zoom_device_passes_through_eo_and_ir():
+    assert web_node.normalize_zoom_device("eo") == "eo"
+    assert web_node.normalize_zoom_device("ir") == "ir"
+
+
+def test_normalize_zoom_device_defaults_to_eo_when_absent_or_unrecognised():
+    assert web_node.normalize_zoom_device("") == "eo"
+    assert web_node.normalize_zoom_device("thermal") == "eo"
+    assert web_node.normalize_zoom_device(None) == "eo"
+
+
+def test_cmd_zoom_ir_device_is_carried_through():
+    adapter = _NodeLikeAdapter()
+    resp = adapter.cmd_zoom({"direction": "in", "device": "ir", "source": "web"})
+    assert resp == {"ok": True, "direction": "in", "device": "ir"}
+    assert adapter.published[-1] == ("zoom", {"direction": "in", "device": "ir", "source": "web"})
+
+
+def test_cmd_zoom_omitted_device_defaults_to_eo():
+    adapter = _NodeLikeAdapter()
+    resp = adapter.cmd_zoom({"direction": "out", "source": "web"})
+    assert resp["device"] == "eo"
+    assert adapter.published[-1][1]["device"] == "eo"
 
 
 def test_cmd_home_uses_control_config_home_position():

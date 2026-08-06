@@ -16,3 +16,8 @@ int32   active_scan_seq  # Sequence number of current scan command
 
 float64 zoom_pctg        # EO lens zoom, percent of travel (DLTVLastNMEAGet Zoom_pctg); 0 if unknown/IR-only
 float64 zoom_mm           # EO lens focal length, mm (DLTVLastNMEAGet Zoom); 0 if unknown/IR-only
+
+float64 ir_zoom_pctg     # IR lens zoom, percent of travel, quantised to 6.25 steps
+                          # (IRLastNMEAGet Zoom_Pctg -- note capital P, differs from
+                          # DLTV's Zoom_pctg); 0 if unknown/no reading yet
+float64 ir_fov            # IR lens field of view, degrees (IRLastNMEAGet FOV); 0 if unknown

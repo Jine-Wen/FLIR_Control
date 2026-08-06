@@ -168,6 +168,8 @@ def ptz_state_msg_to_state_dict(msg: Any) -> dict[str, Any]:
         "active_scan_seq": msg.active_scan_seq,
         "zoom_pctg": msg.zoom_pctg,
         "zoom_mm": msg.zoom_mm,
+        "ir_zoom_pctg": msg.ir_zoom_pctg,
+        "ir_fov": msg.ir_fov,
         "stamp": stamp,
     }
 
@@ -291,6 +293,14 @@ def normalize_zoom_direction(direction: Any) -> str:
     unrecognised -- becomes ``"stop"``. The lens is CONTINUOUS, so "do
     nothing" is never a safe default for a value we don't understand."""
     return direction if direction in ("in", "out") else "stop"
+
+
+def normalize_zoom_device(device: Any) -> str:
+    """Same rule as ``nodes/ptz_node.py``'s ``_on_zoom``: any value other
+    than ``"eo"``/``"ir"`` -- missing, malformed, or simply unrecognised --
+    defaults to ``"eo"``, so requests that predate this field keep working
+    unchanged."""
+    return device if device in ("eo", "ir") else "eo"
 
 
 def to_float(value: Any, default: float) -> float:
@@ -608,14 +618,16 @@ if _ROS_AVAILABLE:
 
         def cmd_zoom(self, body: dict[str, Any]) -> dict[str, Any]:
             direction = normalize_zoom_direction(str(body.get("direction", "stop")))
+            device = normalize_zoom_device(str(body.get("device", "eo")))
             source = str(body.get("source") or DEFAULT_SOURCE)
             if not self._allowed(source, is_stop=direction == "stop"):
-                return self._locked_response({"direction": direction})
+                return self._locked_response({"direction": direction, "device": device})
             msg = ZoomCmd()
             msg.direction = direction
+            msg.device = device
             msg.source = source
             self._zoom_pub.publish(msg)
-            return {"ok": True, "direction": direction}
+            return {"ok": True, "direction": direction, "device": device}
 
         def cmd_home(self, body: dict[str, Any]) -> dict[str, Any]:
             source = str(body.get("source") or DEFAULT_SOURCE)

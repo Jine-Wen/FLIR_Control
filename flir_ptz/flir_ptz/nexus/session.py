@@ -54,12 +54,14 @@ from flir_ptz.nexus.protocol import (
     SESSION_SAVE,
     RC,
     DltvSample,
+    IrSample,
     NexusError,
     PtSample,
     build_query,
     classify,
     normalize_base_url,
     parse_dltv,
+    parse_ir,
     parse_nmea,
     unwrap,
 )
@@ -633,6 +635,37 @@ class CameraSession:
         channel is a single serial resource shared with the PT read."""
         payload = await self.execute("DLTVLastNMEAGet")
         return parse_dltv(payload)
+
+    # -- IR (thermal) zoom (measured on a real 364C -- see worker brief) --
+    #
+    # Unlike EO, the IR actions are plain IRZoomIn/IRZoomOut/IRZoomStop --
+    # NOT the DLTV-style "CountsIncrement/Decrement" (IRZoomCountsIncrement
+    # measured RC=7 "Invalid function" on a real 364C). Still CONTINUOUS
+    # (hold-until-stop) like EO, so the same dead-man timer applies (see
+    # ``control/controller.py``). None of these three end in "Get" and none
+    # start with "SERVERRemoteControl", so token.needs_token()'s
+    # deny-by-default rule correctly requires the control token for them,
+    # routed through execute() exactly like EO zoom -- no special-casing
+    # here.
+
+    async def ir_zoom_in(self) -> None:
+        await self.execute("IRZoomIn")
+
+    async def ir_zoom_out(self) -> None:
+        await self.execute("IRZoomOut")
+
+    async def ir_zoom_stop(self) -> None:
+        await self.execute("IRZoomStop")
+
+    async def read_ir(self) -> IrSample:
+        """IRLastNMEAGet -- read-only (ends in "Get"), never needs the
+        token. Uses :func:`parse_ir`, NOT :func:`parse_dltv` -- the IR
+        payload's ``Zoom_Pctg`` key is capitalised differently from DLTV's
+        ``Zoom_pctg`` (see ``IrSample``'s docstring). Polled on the same
+        kind of cadence as EO (see ``control/controller.py``), independent
+        of the EO poll."""
+        payload = await self.execute("IRLastNMEAGet")
+        return parse_ir(payload)
 
     async def has_control(self) -> bool:
         status = await self.execute("SERVERLastNMEAGet")

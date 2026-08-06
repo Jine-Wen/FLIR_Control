@@ -80,6 +80,13 @@
           <span id="irTransport">—</span>
           <code id="irUrl">—</code>
         </div>
+        <!-- IR zoom: continuous like EO, but quantised by the camera to
+             ~6.25% steps. Press-and-hold — see app.js wireZoomControls(). -->
+        <div class="zoom-controls" id="irZoomControls">
+          <button id="irZoomOut" class="secondary" type="button" aria-label="Zoom out">− Zoom</button>
+          <span class="zoom-readout"><span id="irZoomPctg">--</span><span class="unit">%</span></span>
+          <button id="irZoomIn" class="secondary" type="button" aria-label="Zoom in">+ Zoom</button>
+        </div>
       </article>
 
       <div id="eoPaneWrap">
@@ -102,8 +109,9 @@
           <span id="eoTransport">—</span>
           <code id="eoUrl">—</code>
         </div>
-        <!-- EO-only: the daylight lens has continuous zoom, IR does not.
-             Press-and-hold — see app.js wireZoomControls(). -->
+        <!-- EO's daylight lens zoom is continuous; IR (see above) has its
+             own, independent zoom controls. Press-and-hold — see app.js
+             wireZoomControls(). -->
         <div class="zoom-controls" id="eoZoomControls">
           <button id="eoZoomOut" class="secondary" type="button" aria-label="Zoom out">− Zoom</button>
           <span class="zoom-readout"><span id="eoZoomPctg">--</span><span class="unit">%</span></span>

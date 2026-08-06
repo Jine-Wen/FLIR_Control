@@ -37,10 +37,13 @@ const ui = {
   eoZoomIn:   $("eoZoomIn"),
   eoZoomOut:  $("eoZoomOut"),
   eoZoomPctg: $("eoZoomPctg"),
+  irZoomIn:   $("irZoomIn"),
+  irZoomOut:  $("irZoomOut"),
+  irZoomPctg: $("irZoomPctg"),
 };
 
 // Buttons that must be disabled when locked
-const CTRL_BUTTONS = ["moveButton", "centerButton", "homeButton", "scanStart", "scanStop", "eoZoomIn", "eoZoomOut"];
+const CTRL_BUTTONS = ["moveButton", "centerButton", "homeButton", "scanStart", "scanStop", "eoZoomIn", "eoZoomOut", "irZoomIn", "irZoomOut"];
 const CTRL_PANELS  = ["movePanel", "scanPanel"];
 
 let joy = { active: false, x: 0, y: 0 };
@@ -165,6 +168,17 @@ function diffStyle(el, key, prop, value) {
 /* ── Formatting ─────────────────────────────────────────────── */
 function fmt(value, dec = 2) {
   return Number.isFinite(value) ? value.toFixed(dec) : "--";
+}
+
+// Zoom percentage: rounded to the nearest whole percent rather than one
+// decimal place. The camera's own reading has enough noise that a
+// stationary lens can report e.g. 31.24 on one poll and 31.26 on the next
+// -- fine at whole-percent resolution, but toFixed(1) turns that same noise
+// into a visible flicker between "31.2" and "31.3". IR is quantised to
+// 6.25% steps anyway, so whole-percent is no loss of real precision there
+// either.
+function fmtPct(value) {
+  return Number.isFinite(value) ? String(Math.round(value)) : "--";
 }
 
 /* ── API ────────────────────────────────────────────────────── */
@@ -471,7 +485,8 @@ function renderState(payload) {
   diffStyle(ui.barX, "barX", "width", px);
   diffStyle(ui.barY, "barY", "width", py);
 
-  diffText(ui.eoZoomPctg, "eoZoomPctg", fmt(s.zoom_pctg, 1));
+  diffText(ui.eoZoomPctg, "eoZoomPctg", fmtPct(s.zoom_pctg));
+  diffText(ui.irZoomPctg, "irZoomPctg", fmtPct(s.ir_zoom_pctg));
 
   applyModel(payload.model, payload.streams);
   applyControlSource(payload.control_source);
@@ -639,60 +654,78 @@ function wireControls() {
   });
 }
 
-/* ── EO zoom: press-and-hold ────────────────────────────────────────
-   The lens is CONTINUOUS -- one "in"/"out" keeps it moving until a "stop"
-   arrives (control/controller.py runs a matching dead-man timer server-side
-   as a last-resort safety net, but the browser must still behave: resend
-   the held direction periodically so that timer never has a reason to
-   fire, and send "stop" the instant the hold ends for any reason —
-   pointerup, pointercancel, pointerleave, the tab going hidden, or the
-   page being torn down entirely.
+/* ── EO/IR zoom: press-and-hold ────────────────────────────────────────
+   Both lenses are CONTINUOUS -- one "in"/"out" keeps it moving until a
+   "stop" arrives (control/controller.py runs a matching dead-man timer
+   server-side, independently per device, as a last-resort safety net, but
+   the browser must still behave: resend the held direction periodically so
+   that timer never has a reason to fire, and send "stop" the instant the
+   hold ends for any reason — pointerup, pointercancel, pointerleave, the
+   tab going hidden, or the page being torn down entirely.
+
+   EO and IR hold state is tracked independently (keyed by device) so
+   holding one pane's button can never be confused with, or cancel, a hold
+   on the other pane's button. Every command always names its device
+   explicitly -- there is no "unspecified device" case here.
 */
 const ZOOM_RESEND_MS = 400;
-let zoomHoldTimer = null;
-let zoomHoldDirection = null;
+const zoomHold = {
+  eo: { timer: null, direction: null },
+  ir: { timer: null, direction: null },
+};
 
-function sendZoom(direction) {
-  post("/api/cmd/zoom", { direction });
+function sendZoom(device, direction) {
+  post("/api/cmd/zoom", { direction, device });
 }
 
-function stopZoomHold() {
-  if (zoomHoldTimer) { clearInterval(zoomHoldTimer); zoomHoldTimer = null; }
-  if (zoomHoldDirection) {
-    zoomHoldDirection = null;
-    sendZoom("stop");
+function stopZoomHold(device) {
+  const state = zoomHold[device];
+  if (!state) return;
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  if (state.direction) {
+    state.direction = null;
+    sendZoom(device, "stop");
   }
 }
 
-function startZoomHold(direction) {
-  stopZoomHold();
-  zoomHoldDirection = direction;
-  sendZoom(direction);
+function stopAllZoomHolds() {
+  stopZoomHold("eo");
+  stopZoomHold("ir");
+}
+
+function startZoomHold(device, direction) {
+  stopZoomHold(device);
+  const state = zoomHold[device];
+  state.direction = direction;
+  sendZoom(device, direction);
   // Keep renewing while held so the server-side dead-man timer never fires
   // for a genuinely-held button.
-  zoomHoldTimer = setInterval(() => sendZoom(direction), ZOOM_RESEND_MS);
+  state.timer = setInterval(() => sendZoom(device, direction), ZOOM_RESEND_MS);
 }
 
 function wireZoomControls() {
-  const buttons = [[ui.eoZoomIn, "in"], [ui.eoZoomOut, "out"]];
-  for (const [btn, direction] of buttons) {
+  const buttons = [
+    [ui.eoZoomIn, "eo", "in"], [ui.eoZoomOut, "eo", "out"],
+    [ui.irZoomIn, "ir", "in"], [ui.irZoomOut, "ir", "out"],
+  ];
+  for (const [btn, device, direction] of buttons) {
     if (!btn) continue;
     btn.addEventListener("pointerdown", (evt) => {
       if (btn.disabled) return;
       btn.setPointerCapture(evt.pointerId);
-      startZoomHold(direction);
+      startZoomHold(device, direction);
     });
-    btn.addEventListener("pointerup",     stopZoomHold);
-    btn.addEventListener("pointercancel", stopZoomHold);
-    btn.addEventListener("pointerleave",  stopZoomHold);
+    btn.addEventListener("pointerup",     () => stopZoomHold(device));
+    btn.addEventListener("pointercancel", () => stopZoomHold(device));
+    btn.addEventListener("pointerleave",  () => stopZoomHold(device));
   }
 
   // Closing/backgrounding the tab, or losing focus entirely, must not
-  // leave the lens running with nobody watching.
+  // leave either lens running with nobody watching.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") stopZoomHold();
+    if (document.visibilityState === "hidden") stopAllZoomHolds();
   });
-  window.addEventListener("pagehide", stopZoomHold);
+  window.addEventListener("pagehide", stopAllZoomHolds);
 }
 
 /* ── Boot ───────────────────────────────────────────────────────── */

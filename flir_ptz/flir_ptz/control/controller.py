@@ -77,7 +77,7 @@ import concurrent.futures
 import dataclasses
 import logging
 import time
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from flir_ptz.control.config import ControlConfig
 from flir_ptz.control.fsm import (
@@ -95,7 +95,7 @@ from flir_ptz.control.fsm import (
     StepResult,
 )
 from flir_ptz.control.profiles import az_error
-from flir_ptz.nexus.protocol import DltvSample, PtSample
+from flir_ptz.nexus.protocol import DltvSample, IrSample, PtSample
 from flir_ptz.nexus.session import CameraSession, TokenLost
 from flir_ptz.nexus.token import TokenAction, TokenPolicy, TokenTracker
 
@@ -132,30 +132,63 @@ def _default_logger() -> _StdlibLoggerAdapter:
 _FRAME_DIVERGENCE_THRESHOLD_DEG = 1.0
 _FRAME_DIVERGENCE_PERSIST_S = 3.0
 
-# -- EO zoom: orthogonal to MotionFSM, driven straight from the tick -------
+# -- EO/IR zoom: orthogonal to MotionFSM, driven straight from the tick ---
 #
 # Zoom is deliberately NOT a MotionFSM mode (it must never disturb whatever
 # pan/tilt mode is currently running) and deliberately NOT executed from a
 # ROS callback thread (the tick loop is the only thing allowed to touch the
 # session -- see module docstring). ``submit_zoom()`` just records the
-# latest requested direction; ``_tick()`` drains it every tick, exactly like
-# ``MotionFSM.submit()``/``step()`` does for pan/tilt, but entirely outside
-# the FSM.
+# latest requested direction for whichever device it names; ``_tick()``
+# drains it every tick, exactly like ``MotionFSM.submit()``/``step()`` does
+# for pan/tilt, but entirely outside the FSM.
 #
-# Because DLTVZoomCountsIncrement/Decrement are CONTINUOUS -- the lens keeps
-# moving until DLTVZoomStop arrives (measured on a real 364C) -- a dead-man
-# timer is mandatory: while zooming, if no further "in"/"out" request
-# renews it within ``ZOOM_DEADMAN_S``, the tick issues DLTVZoomStop on its
-# own. A dropped pointerup, a closed browser tab, or a network blip must
-# never leave the lens driving to its mechanical limit unattended.
+# EO and IR are tracked through two entirely independent ``_ZoomChannel``
+# instances (``self._eo_zoom`` / ``self._ir_zoom``, see the dataclass below)
+# -- separate pending direction, separate dead-man deadline, separate
+# active flag, separate last-known reading, separate poll timer. Draining
+# one channel never reads or writes the other's state, so zooming IR can
+# never stop EO (or vice versa), and each stops itself independently when
+# its own hold is not renewed. Neither channel ever touches ``self._fsm``.
+#
+# Because DLTVZoomCountsIncrement/Decrement (EO) and IRZoomIn/IRZoomOut (IR)
+# are both CONTINUOUS -- the lens keeps moving until the matching *Stop
+# arrives (measured on a real 364C for both) -- a dead-man timer is
+# mandatory for each: while a device is zooming, if no further "in"/"out"
+# request renews it within ``ZOOM_DEADMAN_S``, the tick stops that device's
+# lens on its own. A dropped pointerup, a closed browser tab, or a network
+# blip must never leave a lens driving to its mechanical limit unattended.
 ZOOM_DEADMAN_S = 1.0
 
-# DLTVLastNMEAGet shares the same single serial CGI channel as PTLastNMEAGet
-# (read every tick already) -- polling it that often would just steal
-# channel slots from pan/tilt for no benefit. Poll on this slow cadence
-# while idle instead, and force one extra read right after a zoom command so
-# the UI reflects a change quickly (see ``_maybe_poll_dltv``).
+# DLTVLastNMEAGet/IRLastNMEAGet share the same single serial CGI channel as
+# PTLastNMEAGet (read every tick already) -- polling either that often while
+# idle would just steal channel slots from pan/tilt for no benefit. Poll on
+# this slow cadence while a device is idle, and switch to the much faster
+# ``ZOOM_POLL_ACTIVE_S`` cadence while that device is actively zooming so the
+# UI readout tracks the lens instead of sitting still for up to
+# ``ZOOM_POLL_IDLE_S`` and then jumping (see ``_maybe_poll_zoom_channel``).
+# A device that has never been zoomed and is idle is never polled faster
+# than the slow cadence -- only genuine zoom activity earns the fast one.
 ZOOM_POLL_IDLE_S = 2.0
+ZOOM_POLL_ACTIVE_S = 0.25
+
+
+@dataclasses.dataclass
+class _ZoomChannel:
+    """Per-device zoom bookkeeping -- one independent instance each for EO
+    and IR (see the "EO/IR zoom" section above). Grouping these fields here
+    rather than duplicating a parallel set of ``self._eo_*``/``self._ir_*``
+    attributes is what makes the tick's drain/poll logic a single shared
+    implementation instead of two hand-copied ones that could drift apart.
+    """
+
+    pending: Optional[str] = None        # drained once per tick
+    active: bool = False                  # lens believed moving
+    deadline: Optional[float] = None      # dead-man expiry
+    sample: Optional[Any] = None          # most recent DltvSample/IrSample
+    last_poll_at: Optional[float] = None
+    # Force one read on the first opportunity so the UI has a value to show
+    # without having to wait out the idle cadence.
+    poll_due: bool = True
 
 
 class TickController:
@@ -185,6 +218,7 @@ class TickController:
         clock: Callable[[], float] = time.monotonic,
         zoom_deadman_s: float = ZOOM_DEADMAN_S,
         zoom_poll_idle_s: float = ZOOM_POLL_IDLE_S,
+        zoom_poll_active_s: float = ZOOM_POLL_ACTIVE_S,
     ) -> None:
         if goto_feedback_frame not in ("abs", "geo"):
             raise ValueError(f"goto_feedback_frame must be 'abs' or 'geo', got {goto_feedback_frame!r}")
@@ -225,17 +259,14 @@ class TickController:
         # discarded via a completion callback once done.
         self._background_tasks: set = set()
 
-        # -- EO zoom: orthogonal to the FSM (see module docstring) --------
+        # -- EO/IR zoom: orthogonal to the FSM (see module docstring) -----
         self._zoom_deadman_s = max(0.0, float(zoom_deadman_s))
         self._zoom_poll_idle_s = max(0.0, float(zoom_poll_idle_s))
-        self._pending_zoom: Optional[str] = None    # drained once per tick
-        self._zoom_active: bool = False              # lens believed moving
-        self._zoom_deadline: Optional[float] = None  # dead-man expiry
-        self._dltv_sample: Optional[DltvSample] = None
-        self._last_dltv_poll_at: Optional[float] = None
-        # Force one DLTV read on the first opportunity so the UI has a
-        # value to show without having to wait out the idle cadence.
-        self._dltv_poll_due: bool = True
+        self._zoom_poll_active_s = max(0.0, float(zoom_poll_active_s))
+        # Two entirely independent channels -- see _ZoomChannel/module
+        # docstring. Draining/polling one never touches the other's state.
+        self._eo_zoom = _ZoomChannel()
+        self._ir_zoom = _ZoomChannel()
 
     # -- properties ------------------------------------------------------
 
@@ -249,11 +280,20 @@ class TickController:
 
     @property
     def zoom_state(self) -> Optional[DltvSample]:
-        """The most recent DLTVLastNMEAGet reading, or ``None`` before the
-        first successful poll. Read by the ROS node to populate
-        ``PtzState.zoom_pctg``/``zoom_mm`` -- see ``_maybe_poll_dltv`` for
-        the polling cadence."""
-        return self._dltv_sample
+        """The most recent DLTVLastNMEAGet (EO) reading, or ``None`` before
+        the first successful poll. Read by the ROS node to populate
+        ``PtzState.zoom_pctg``/``zoom_mm`` -- see
+        ``_maybe_poll_zoom_channel`` for the polling cadence."""
+        return self._eo_zoom.sample
+
+    @property
+    def ir_zoom_state(self) -> Optional[IrSample]:
+        """The most recent IRLastNMEAGet (IR) reading, or ``None`` before
+        the first successful poll. Read by the ROS node to populate
+        ``PtzState.ir_zoom_pctg``/``ir_fov``. Entirely independent of
+        :attr:`zoom_state` -- see the "EO/IR zoom" section of the module
+        docstring."""
+        return self._ir_zoom.sample
 
     # -- submitting intents (the only thing ROS callbacks touch) --------
 
@@ -280,8 +320,15 @@ class TickController:
             return
         self._loop.call_soon_threadsafe(self.submit, intent)
 
-    def submit_zoom(self, direction: str) -> None:
-        """Record a pending EO zoom request for the next tick to drain.
+    def submit_zoom(self, direction: str, device: str = "eo") -> None:
+        """Record a pending zoom request for ``device`` for the next tick
+        to drain.
+
+        ``device`` selects which of the two independent channels
+        (``self._eo_zoom`` / ``self._ir_zoom``) the request lands on --
+        anything other than ``"eo"``/``"ir"`` (absent, malformed, or simply
+        unrecognised) defaults to ``"eo"`` so existing callers that never
+        pass ``device`` at all keep working unchanged.
 
         Thread-safe -- unlike :meth:`submit`, this may be called from *any*
         thread, including a ROS subscription callback (mirrors
@@ -295,13 +342,15 @@ class TickController:
         """
         if direction not in ("in", "out", "stop"):
             raise ValueError(f"zoom direction must be 'in', 'out', or 'stop', got {direction!r}")
+        device = device if device in ("eo", "ir") else "eo"
         if self._loop is None:
-            self._set_pending_zoom(direction)
+            self._set_pending_zoom(direction, device)
             return
-        self._loop.call_soon_threadsafe(self._set_pending_zoom, direction)
+        self._loop.call_soon_threadsafe(self._set_pending_zoom, direction, device)
 
-    def _set_pending_zoom(self, direction: str) -> None:
-        self._pending_zoom = direction
+    def _set_pending_zoom(self, direction: str, device: str) -> None:
+        channel = self._eo_zoom if device == "eo" else self._ir_zoom
+        channel.pending = direction
         if self._wakeup is not None:
             self._wakeup.set()
 
@@ -371,9 +420,10 @@ class TickController:
         ):
             self._home_done_event.set()
 
-        # EO zoom: fully orthogonal to the FSM step above -- deliberately
+        # EO/IR zoom: fully orthogonal to the FSM step above -- deliberately
         # not routed through result.actions/MotionFSM (see module
-        # docstring's "EO zoom" section).
+        # docstring's "EO/IR zoom" section). Each device is drained
+        # independently -- draining one can never affect the other.
         await self._drain_zoom(now)
 
         self._run_token_periodic(now)
@@ -516,81 +566,138 @@ class TickController:
         if self._wakeup is not None:
             self._wakeup.set()
 
-    # -- EO zoom: drain pending request + dead-man timer + slow DLTV poll --
+    # -- EO/IR zoom: drain pending request + dead-man timer + adaptive poll --
 
     async def _drain_zoom(self, now: float) -> None:
-        """Once per tick: send whatever zoom direction was requested since
-        the last tick, or -- if nothing new arrived and the lens is still
-        believed to be moving -- check the dead-man timer. Then (cheaply)
-        decide whether a DLTV poll is due. Never touches ``self._fsm``:
-        this is the whole point of keeping zoom orthogonal to pan/tilt."""
-        direction = self._pending_zoom
-        self._pending_zoom = None
+        """Once per tick: drain the EO channel, then the IR channel,
+        completely independently of each other (see the "EO/IR zoom"
+        section of the module docstring). Never touches ``self._fsm``: this
+        is the whole point of keeping zoom orthogonal to pan/tilt."""
+        await self._drain_zoom_channel(
+            self._eo_zoom,
+            now,
+            zoom_in=self._session.zoom_in,
+            zoom_out=self._session.zoom_out,
+            zoom_stop=self._session.zoom_stop,
+            read=self._session.read_dltv,
+            label="EO",
+        )
+        await self._drain_zoom_channel(
+            self._ir_zoom,
+            now,
+            zoom_in=self._session.ir_zoom_in,
+            zoom_out=self._session.ir_zoom_out,
+            zoom_stop=self._session.ir_zoom_stop,
+            read=self._session.read_ir,
+            label="IR",
+        )
+
+    async def _drain_zoom_channel(
+        self,
+        channel: _ZoomChannel,
+        now: float,
+        *,
+        zoom_in: Callable[[], Awaitable[None]],
+        zoom_out: Callable[[], Awaitable[None]],
+        zoom_stop: Callable[[], Awaitable[None]],
+        read: Callable[[], Awaitable[Any]],
+        label: str,
+    ) -> None:
+        """Send whatever direction was requested for ``channel`` since the
+        last tick, or -- if nothing new arrived and that channel's lens is
+        still believed to be moving -- check its dead-man timer. Then
+        (cheaply) decide whether that channel's state poll is due. Operates
+        purely on ``channel`` plus the device-specific coroutines passed
+        in, so EO's and IR's drains can never observe or mutate each
+        other's state."""
+        direction = channel.pending
+        channel.pending = None
 
         if direction is not None:
-            await self._apply_zoom_command(direction, now)
-        elif self._zoom_active and self._zoom_deadline is not None and now >= self._zoom_deadline:
+            await self._apply_zoom_command(channel, direction, now, zoom_in, zoom_out, zoom_stop, label)
+        elif channel.active and channel.deadline is not None and now >= channel.deadline:
             # MANDATORY SAFETY: no renewing "in"/"out" arrived in time --
             # a dropped pointerup, a closed tab, a network blip -- stop the
             # lens ourselves rather than let it drive to its mechanical
             # limit unattended.
             self._log.warn(
-                f"[flir_ptz] EO zoom dead-man timer expired ({self._zoom_deadman_s:.1f}s "
+                f"[flir_ptz] {label} zoom dead-man timer expired ({self._zoom_deadman_s:.1f}s "
                 "without renewal) -- stopping zoom"
             )
-            await self._apply_zoom_command("stop", now)
+            await self._apply_zoom_command(channel, "stop", now, zoom_in, zoom_out, zoom_stop, label)
 
-        await self._maybe_poll_dltv(now)
+        await self._maybe_poll_zoom_channel(channel, now, read, label)
 
-    async def _apply_zoom_command(self, direction: str, now: float) -> None:
+    async def _apply_zoom_command(
+        self,
+        channel: _ZoomChannel,
+        direction: str,
+        now: float,
+        zoom_in: Callable[[], Awaitable[None]],
+        zoom_out: Callable[[], Awaitable[None]],
+        zoom_stop: Callable[[], Awaitable[None]],
+        label: str,
+    ) -> None:
         try:
             if direction == "in":
-                await self._session.zoom_in()
+                await zoom_in()
             elif direction == "out":
-                await self._session.zoom_out()
+                await zoom_out()
             else:  # "stop" -- always forwarded, even if we didn't think we were zooming
-                await self._session.zoom_stop()
+                await zoom_stop()
         except TokenLost as exc:
             # Deliberately NOT the same bridge as _handle_token_lost: that
             # submits an FSM Intent, and zoom must never touch fsm.mode.
             # The camera-side lens state is now unknown to us; the safest
             # local belief is "not actively renewing", so a stale dead-man
-            # timer can't fire a pointless extra stop later.
-            self._log.warn(f"[flir_ptz] EO zoom {direction!r} failed (token lost): {exc}")
-            self._zoom_active = False
-            self._zoom_deadline = None
+            # timer can't fire a pointless extra stop later. Only this
+            # channel's state changes -- the other device's zoom is
+            # completely unaffected.
+            self._log.warn(f"[flir_ptz] {label} zoom {direction!r} failed (token lost): {exc}")
+            channel.active = False
+            channel.deadline = None
             return
         except Exception as exc:
-            self._log.warn(f"[flir_ptz] EO zoom {direction!r} failed: {exc}")
+            self._log.warn(f"[flir_ptz] {label} zoom {direction!r} failed: {exc}")
             return
 
         self._token_tracker.note_command(now)
         if direction == "stop":
-            self._zoom_active = False
-            self._zoom_deadline = None
+            channel.active = False
+            channel.deadline = None
         else:
-            self._zoom_active = True
-            self._zoom_deadline = now + self._zoom_deadman_s
-        # Refresh the DLTV reading promptly so the UI reflects the change
-        # quickly, instead of waiting out the idle poll cadence.
-        self._dltv_poll_due = True
+            channel.active = True
+            channel.deadline = now + self._zoom_deadman_s
+        # Refresh this channel's reading promptly so the UI reflects the
+        # change quickly, instead of waiting out the idle poll cadence.
+        channel.poll_due = True
 
-    async def _maybe_poll_dltv(self, now: float) -> None:
+    async def _maybe_poll_zoom_channel(
+        self, channel: _ZoomChannel, now: float, read: Callable[[], Awaitable[Any]], label: str
+    ) -> None:
+        """Adaptive cadence (fixes the jittery readout): poll roughly every
+        ``ZOOM_POLL_ACTIVE_S`` while ``channel`` is actively zooming, so the
+        UI tracks the lens instead of sitting still for up to
+        ``ZOOM_POLL_IDLE_S`` and then jumping. Falls back to the slow idle
+        cadence the instant the channel stops being active (dead-man fired,
+        explicit stop, or it was simply never zoomed) so the single serial
+        CGI channel is not wasted on a stationary lens."""
+        poll_interval = self._zoom_poll_active_s if channel.active else self._zoom_poll_idle_s
         due = (
-            self._dltv_poll_due
-            or self._last_dltv_poll_at is None
-            or (now - self._last_dltv_poll_at) >= self._zoom_poll_idle_s
+            channel.poll_due
+            or channel.last_poll_at is None
+            or (now - channel.last_poll_at) >= poll_interval
         )
         if not due:
             return
-        self._dltv_poll_due = False
-        self._last_dltv_poll_at = now
+        channel.poll_due = False
+        channel.last_poll_at = now
         try:
-            sample = await self._session.read_dltv()
+            sample = await read()
         except Exception as exc:  # TokenLost can't occur here (read-only), but never risk the tick
-            self._log.warn(f"[flir_ptz] DLTV read failed: {exc}")
+            self._log.warn(f"[flir_ptz] {label} state read failed: {exc}")
             return
-        self._dltv_sample = sample
+        channel.sample = sample
 
     def _publish_snapshot(self, sample: Optional[PtSample], result: StepResult) -> None:
         """Hand the tick's telemetry to the observer, defensively.

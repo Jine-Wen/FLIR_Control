@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for the EO (daylight) zoom path added to
-flir_ptz.control.controller.TickController: ``submit_zoom`` / the tick's
-dead-man timer / the slow DLTV poll cadence / the orthogonality invariant
-(zoom never touches ``fsm.mode``).
+"""Tests for the EO (daylight) and IR (thermal) zoom paths added to
+flir_ptz.control.controller.TickController: ``submit_zoom(direction,
+device)`` / the tick's per-device dead-man timers / the adaptive poll
+cadence / the orthogonality invariant (zoom never touches ``fsm.mode``) /
+EO-IR independence (stopping/zooming one must never affect the other).
 
 Same seam as test_controller.py (whose in-process kinematic fake this file
 deliberately does not import, to keep test files collection-order
@@ -66,6 +67,12 @@ class ZoomFake:
         self.dltv_calls = 0
         self.zoom_mm = 40.0
         self.zoom_pctg = 20.0
+        # IR: independent state from EO above -- separate call list, separate
+        # poll counter, separate reading.
+        self.ir_zoom_calls: list[str] = []  # "in" | "out" | "stop", call order
+        self.ir_calls = 0
+        self.ir_fov = 11.67
+        self.ir_zoom_pctg = 31.25
         self.calls: list[tuple[str, dict]] = []
 
     def handle_action(self, params: dict) -> dict:
@@ -115,6 +122,27 @@ class ZoomFake:
                 "Autofocus": 1.0,
             }}
 
+        if action == "IRZoomIn":
+            self.ir_zoom_calls.append("in")
+            return {action: {"Return Code": 0}}
+
+        if action == "IRZoomOut":
+            self.ir_zoom_calls.append("out")
+            return {action: {"Return Code": 0}}
+
+        if action == "IRZoomStop":
+            self.ir_zoom_calls.append("stop")
+            return {action: {"Return Code": 0}}
+
+        if action == "IRLastNMEAGet":
+            self.ir_calls += 1
+            return {action: {
+                "Return Code": 0,
+                "FOV": self.ir_fov,
+                "Zoom_Pctg": self.ir_zoom_pctg,
+                "FOV_Index": 0,
+            }}
+
         return {action: {"Return Code": 0}}
 
     def handle_post(self, url: str, json_body: Any, data_body: Any) -> dict:
@@ -159,6 +187,7 @@ class _Harness:
         *,
         zoom_deadman_s: float = 0.2,
         zoom_poll_idle_s: float = 10.0,
+        zoom_poll_active_s: Optional[float] = None,
     ) -> None:
         self.cam = cam
         self.cfg = cfg or fast_cfg()
@@ -166,14 +195,19 @@ class _Harness:
         self.session = CameraSession(session_cfg, client_factory=lambda: FakeTransport(cam))
         self.fsm = MotionFSM(self.cfg)
         self.snapshots: list = []
-        self.controller = TickController(
-            self.session,
-            self.fsm,
-            self.cfg,
+        controller_kwargs: dict[str, Any] = dict(
             on_snapshot=lambda sample, result: self.snapshots.append((sample, result)),
             reconnect_after_failures=5,
             zoom_deadman_s=zoom_deadman_s,
             zoom_poll_idle_s=zoom_poll_idle_s,
+        )
+        if zoom_poll_active_s is not None:
+            controller_kwargs["zoom_poll_active_s"] = zoom_poll_active_s
+        self.controller = TickController(
+            self.session,
+            self.fsm,
+            self.cfg,
+            **controller_kwargs,
         )
         self._task: Optional[asyncio.Task] = None
 
@@ -500,3 +534,288 @@ def test_zoom_non_stop_is_still_gated_by_the_lease():
     assert arb.allows("web", False, now) is False
     arb.claim("web", now)
     assert arb.allows("web", False, now) is True
+
+
+# ---------------------------------------------------------------------------
+# IR zoom: submit_zoom(direction, "ir") issues the right IR actions, has its
+# own independent dead-man timer, and never touches fsm.mode -- mirrors the
+# EO tests above exactly, using IRZoomIn/IRZoomOut/IRZoomStop.
+# ---------------------------------------------------------------------------
+
+
+def test_ir_deadman_timer_fires_a_stop_when_hold_is_not_renewed():
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=0.15)
+        await h.start()
+        try:
+            h.controller.submit_zoom("in", "ir")
+            started = await h.wait_until(lambda: cam.ir_zoom_calls == ["in"], timeout=2.0)
+            assert started, "ir_zoom_in never reached the camera"
+
+            stopped = await h.wait_until(lambda: "stop" in cam.ir_zoom_calls, timeout=2.0)
+            assert stopped, "IR dead-man timer never fired a stop"
+            assert cam.ir_zoom_calls == ["in", "stop"], cam.ir_zoom_calls
+            # EO must be completely untouched.
+            assert cam.zoom_calls == []
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_ir_zoom_never_changes_fsm_mode():
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=0.15)
+        await h.start()
+        try:
+            assert h.fsm.mode == Mode.IDLE
+            h.controller.submit_zoom("in", "ir")
+            await h.wait_until(lambda: cam.ir_zoom_calls == ["in"], timeout=2.0)
+            assert h.fsm.mode == Mode.IDLE
+            await h.wait_until(lambda: "stop" in cam.ir_zoom_calls, timeout=2.0)
+            assert h.fsm.mode == Mode.IDLE
+            assert all(result.mode == Mode.IDLE for _, result in h.snapshots)
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_ir_zoom_state_property_reflects_latest_ir_reading_independent_of_eo():
+    async def body():
+        cam = ZoomFake()
+        cam.ir_fov = 10.70
+        cam.ir_zoom_pctg = 37.50
+        cam.zoom_mm = 41.75
+        cam.zoom_pctg = 18.59
+        h = _Harness(cam, zoom_poll_idle_s=60.0)
+        await h.start()
+        try:
+            got = await h.wait_until(lambda: h.controller.ir_zoom_state is not None, timeout=2.0)
+            assert got
+            ir_sample = h.controller.ir_zoom_state
+            assert ir_sample.fov == pytest.approx(10.70)
+            assert ir_sample.zoom_pctg == pytest.approx(37.50)
+
+            eo_sample = h.controller.zoom_state
+            assert eo_sample is not None
+            assert eo_sample.zoom_pctg == pytest.approx(18.59)
+            # The two properties must never be confused with each other.
+            assert ir_sample.zoom_pctg != eo_sample.zoom_pctg
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+# ---------------------------------------------------------------------------
+# EO / IR independence: zooming or stopping one device must never affect
+# the other's pending command, dead-man deadline, or active flag.
+# ---------------------------------------------------------------------------
+
+
+def test_stopping_eo_leaves_a_running_ir_zoom_untouched():
+    async def body():
+        cam = ZoomFake()
+        # IR's dead-man window is generous so it can't fire on its own
+        # during this test -- only the EO stop below should ever move it.
+        h = _Harness(cam, zoom_deadman_s=5.0)
+        await h.start()
+        try:
+            h.controller.submit_zoom("in", "eo")
+            h.controller.submit_zoom("in", "ir")
+            await h.wait_until(lambda: cam.zoom_calls == ["in"] and cam.ir_zoom_calls == ["in"], timeout=2.0)
+
+            h.controller.submit_zoom("stop", "eo")
+            await h.wait_until(lambda: cam.zoom_calls == ["in", "stop"], timeout=2.0)
+
+            # Give the tick loop a few more rounds to prove IR was never
+            # touched by the EO stop.
+            await asyncio.sleep(0.2)
+            assert cam.ir_zoom_calls == ["in"], (
+                f"stopping EO must not affect IR's running zoom, got {cam.ir_zoom_calls}"
+            )
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_stopping_ir_leaves_a_running_eo_zoom_untouched():
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=5.0)
+        await h.start()
+        try:
+            h.controller.submit_zoom("out", "eo")
+            h.controller.submit_zoom("out", "ir")
+            await h.wait_until(lambda: cam.zoom_calls == ["out"] and cam.ir_zoom_calls == ["out"], timeout=2.0)
+
+            h.controller.submit_zoom("stop", "ir")
+            await h.wait_until(lambda: cam.ir_zoom_calls == ["out", "stop"], timeout=2.0)
+
+            await asyncio.sleep(0.2)
+            assert cam.zoom_calls == ["out"], (
+                f"stopping IR must not affect EO's running zoom, got {cam.zoom_calls}"
+            )
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_each_devices_deadman_fires_independently_stopping_one_leaves_the_other_running():
+    """The core independence guarantee: give EO a short dead-man window and
+    IR a long one. EO's timer must fire on its own while IR, never
+    renewed but still within its own (longer) window, keeps running."""
+
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=0.15)
+        await h.start()
+        try:
+            h.controller.submit_zoom("in", "eo")
+            h.controller.submit_zoom("in", "ir")
+            await h.wait_until(lambda: cam.zoom_calls == ["in"] and cam.ir_zoom_calls == ["in"], timeout=2.0)
+
+            # Keep renewing IR only -- EO's hold must still expire on its own.
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                h.controller.submit_zoom("in", "ir")
+                await asyncio.sleep(0.04)
+
+            assert cam.zoom_calls == ["in", "stop"], (
+                f"EO dead-man must fire on its own even while IR is being renewed, got {cam.zoom_calls}"
+            )
+            # IR was resubmitted repeatedly (each renewal re-issues "in"),
+            # but a renewed hold must never be auto-stopped.
+            assert "stop" not in cam.ir_zoom_calls, (
+                f"a renewed IR hold must never be auto-stopped, got {cam.ir_zoom_calls}"
+            )
+            assert set(cam.ir_zoom_calls) == {"in"}
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+# ---------------------------------------------------------------------------
+# device defaults to "eo" when absent or unrecognised (ZoomCmd.device /
+# submit_zoom's device parameter).
+# ---------------------------------------------------------------------------
+
+
+def test_submit_zoom_device_defaults_to_eo_when_omitted():
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=0.15)
+        await h.start()
+        try:
+            h.controller.submit_zoom("in")  # no device argument at all
+            reached = await h.wait_until(lambda: cam.zoom_calls == ["in"], timeout=2.0)
+            assert reached
+            assert cam.ir_zoom_calls == []
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_submit_zoom_unrecognised_device_defaults_to_eo():
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=0.15)
+        await h.start()
+        try:
+            h.controller.submit_zoom("in", "thermal-camera-2")
+            reached = await h.wait_until(lambda: cam.zoom_calls == ["in"], timeout=2.0)
+            assert reached, "an unrecognised device must fall back to eo, not be silently dropped"
+            assert cam.ir_zoom_calls == []
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+# ---------------------------------------------------------------------------
+# Adaptive polling cadence (jittery-readout fix): fast (~ZOOM_POLL_ACTIVE_S)
+# while a device is actively zooming, slow (ZOOM_POLL_IDLE_S) while idle --
+# including a device that has never been zoomed at all. Counted over
+# simulated (real, but short) time, mirroring the existing idle-cadence test.
+# ---------------------------------------------------------------------------
+
+
+def test_ir_polling_stays_on_its_slow_cadence_while_never_zoomed():
+    async def body():
+        cam = ZoomFake()
+        tick_period_s = 0.01
+        poll_idle_s = 0.3
+        h = _Harness(cam, cfg=fast_cfg(poll_ms=int(tick_period_s * 1000)), zoom_poll_idle_s=poll_idle_s)
+        await h.start()
+        try:
+            run_for_s = poll_idle_s * 3.0
+            await asyncio.sleep(run_for_s)
+
+            ticks_elapsed = len(h.snapshots)
+            assert ticks_elapsed > 5, "test setup problem: too few ticks observed"
+            assert cam.ir_calls < ticks_elapsed / 2, (
+                f"IR polled {cam.ir_calls} times over {ticks_elapsed} ticks while never "
+                "zoomed -- looks like every-tick polling, not the slow idle cadence"
+            )
+            assert 1 <= cam.ir_calls <= 6, cam.ir_calls
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_polling_speeds_up_while_zooming_and_slows_back_down_once_idle():
+    """The adaptive-cadence contract directly: count DLTV polls over a fixed
+    wall-clock window while actively zooming vs. an equal window once the
+    zoom has stopped (dead-man expired) and stayed idle. The active window
+    must show meaningfully more polls than the idle window."""
+
+    async def body():
+        cam = ZoomFake()
+        poll_active_s = 0.03
+        poll_idle_s = 0.3
+        deadman_s = 0.2
+        h = _Harness(
+            cam,
+            cfg=fast_cfg(poll_ms=5),
+            zoom_deadman_s=deadman_s,
+            zoom_poll_idle_s=poll_idle_s,
+            zoom_poll_active_s=poll_active_s,
+        )
+        await h.start()
+        try:
+            # Absorb the forced startup poll.
+            await h.wait_until(lambda: cam.dltv_calls >= 1, timeout=2.0)
+
+            # -- active window: hold "in" continuously for a fixed duration --
+            window_s = 0.3
+            active_deadline = time.monotonic() + window_s
+            while time.monotonic() < active_deadline:
+                h.controller.submit_zoom("in", "eo")
+                await asyncio.sleep(poll_active_s / 2)
+            active_count = cam.dltv_calls
+
+            # Let the dead-man expire and the channel settle into idle.
+            await h.wait_until(lambda: cam.zoom_calls and cam.zoom_calls[-1] == "stop", timeout=2.0)
+            idle_baseline = cam.dltv_calls
+
+            # -- idle window: same wall-clock duration, no zoom activity --
+            await asyncio.sleep(window_s)
+            idle_count = cam.dltv_calls - idle_baseline
+
+            assert active_count > idle_count, (
+                f"expected more DLTV polls while actively zooming ({active_count}) than "
+                f"while idle over an equal window ({idle_count})"
+            )
+            assert idle_count <= 2, f"idle window polled too often: {idle_count}"
+        finally:
+            await h.stop()
+
+    run(body())
