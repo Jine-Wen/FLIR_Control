@@ -213,6 +213,16 @@ button, input { font: inherit; }
 }
 .video-grid.single-pane { grid-template-columns: 1fr; }
 
+/* The EO pane is wrapped in #eoPaneWrap only so app.js has one element to
+   toggle `hidden` on. `display: contents` removes that wrapper from layout so
+   the <article> inside becomes a direct grid item, exactly like the unwrapped
+   IR pane. Without it the wrapper is the grid item -- it stretches to the row
+   height while the article inside keeps its content height, and EO renders
+   visibly shorter than IR. The [hidden] rule must follow, since `contents`
+   would otherwise override the browser's default `display: none`. */
+#eoPaneWrap { display: contents; }
+#eoPaneWrap[hidden] { display: none; }
+
 /* ── Video panes ───────────────────────────────────────────────────────── */
 .video-pane {
   display: grid;
@@ -347,16 +357,24 @@ button, input { font: inherit; }
 /* ── Joystick ──────────────────────────────────────────────────────────── */
 .joystick {
   position: relative;
-  width: 100%;
+  /* Must stay SQUARE. app.js derives the drag radius from
+     getBoundingClientRect().width (`rect.width * 0.38`) and applies it to both
+     axes, so a non-square control desynchronises the pointer geometry from
+     what is drawn. Sizing by width with aspect-ratio guarantees that; a
+     max-height would silently break it by capping one axis only. */
+  width: min(218px, 68vw);
   aspect-ratio: 1;
-  max-height: 220px;
-  margin: 0 auto;
+  margin: 10px auto;
   border-radius: 50%;
   background:
     radial-gradient(circle at 50% 50%, #FFFFFF 0%, var(--panel-2) 62%, #E9EFF7 100%);
   border: 2px solid var(--line-2);
   cursor: grab;
   touch-action: none;
+  /* Without this a drag starts a text selection instead, which fights the
+     pointer capture and makes the stick unusable. */
+  user-select: none;
+  -webkit-user-select: none;
   transition: border-color .25s, box-shadow .25s;
 }
 .joystick.lock-self   { border-color: var(--line-2); box-shadow: none; }
@@ -369,6 +387,8 @@ button, input { font: inherit; }
 
 .stick {
   position: absolute;
+  user-select: none;
+  -webkit-user-select: none;
   top: 50%; left: 50%;
   width: 21%; height: 21%;
   margin: -10.5% 0 0 -10.5%;
