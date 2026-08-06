@@ -37,6 +37,8 @@ from flir_ptz.nexus.protocol import LOGIN_AUTH, SESSION_SAVE, NexusError  # noqa
 from flir_ptz.nexus.token import TokenState  # noqa: E402
 from flir_ptz.nexus.session import (  # noqa: E402
     CameraSession,
+    NotConfigured,
+    SessionError,
     ConnectionFailure,
     EnsureControlTimeout,
     LoginError,
@@ -814,3 +816,52 @@ def test_module_imports_without_httpx_installed():
     )
     assert proc.returncode == 0, proc.stderr
     assert "OK" in proc.stdout
+
+
+# ── "no camera configured" is a state, not a transport failure ───────────────
+#
+# Regression guard. An empty host used to reach httpx, which raised
+# `UnsupportedProtocol: Request URL is missing an 'http://' or 'https://'
+# protocol` -- once per login attempt, ten attempts, two seconds apart. Twenty
+# seconds of output that named neither the real problem (no camera configured)
+# nor its fix, for what is a perfectly normal startup state: the web setup page
+# exists precisely so the camera can be chosen at runtime.
+
+
+def test_connect_with_empty_host_raises_not_configured_immediately():
+    cfg = CameraConfig(host="", username="admin", password="x", login_mode="basic")
+    fake = NexusFake()
+    transport = FakeTransport(fake)
+    session = CameraSession(cfg, client_factory=lambda: transport)
+
+    with pytest.raises(NotConfigured):
+        asyncio.run(session.connect())
+
+    # The point is that it never tried: no login attempts, no retry sleeps,
+    # and no transport was even constructed.
+    assert fake.calls == []
+
+
+def test_not_configured_is_distinct_from_login_failure():
+    """The node treats them differently -- one waits quietly for a config,
+    the other retries -- so they must not be the same exception."""
+    assert issubclass(NotConfigured, SessionError)
+    assert not issubclass(NotConfigured, LoginError)
+    assert not issubclass(LoginError, NotConfigured)
+
+
+def test_whitespace_only_host_is_also_not_configured():
+    cfg = CameraConfig(host="   ", username="admin", password="x", login_mode="basic")
+    session = CameraSession(cfg, client_factory=lambda: FakeTransport(NexusFake()))
+    with pytest.raises(NotConfigured):
+        asyncio.run(session.connect())
+
+
+def test_bare_host_without_scheme_still_connects_normally():
+    """The guard must reject only an absent host, never a valid bare IP --
+    normalize_base_url adds the scheme for those."""
+    fake = NexusFake()
+    cfg = CameraConfig(host="192.0.2.10", username="admin", password="x", login_mode="basic")
+    session = CameraSession(cfg, client_factory=lambda: FakeTransport(fake))
+    asyncio.run(session.connect())
+    assert session.session_id == fake.session_id

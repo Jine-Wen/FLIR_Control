@@ -62,7 +62,7 @@ from flir_ptz.control.config import CameraConfig, ControlConfig, load_camera_con
 from flir_ptz.control.controller import TickController
 from flir_ptz.control.fsm import Intent, Mode, MotionFSM, StepResult
 from flir_ptz.nexus.protocol import PtSample
-from flir_ptz.nexus.session import CameraSession
+from flir_ptz.nexus.session import CameraSession, NotConfigured
 from flir_ptz.nexus.token import TokenPolicy
 
 # Latched QoS for camera_status / control_source (spec sec. 5): late
@@ -361,20 +361,44 @@ class FlirPtzNode(Node):
         publish status, retry every 3s, and respond immediately to a
         reconfigure request instead of waiting out the retry delay."""
         self._publish_cam_status("connecting", camera_cfg.host, "")
+        warned_unconfigured = False
         while self._alive:
             try:
                 await session.connect()
                 return True
+            except NotConfigured as exc:
+                # Not a failure: no camera has been chosen yet. Say so once,
+                # with the actual ways to fix it, then wait quietly for a
+                # config to arrive instead of logging the same thing every
+                # three seconds forever.
+                if not warned_unconfigured:
+                    warned_unconfigured = True
+                    self.get_logger().warn(
+                        "[flir_ptz] no camera configured -- idle until one is set. "
+                        "Either relaunch with credentials:\n"
+                        "    ros2 launch flir_ptz flir_ptz.launch.py "
+                        "host:=<ip> username:=<user> password:=<pass>\n"
+                        "  or export FLIR_HOST / FLIR_USERNAME / FLIR_PASSWORD,\n"
+                        "  or open the web setup page and enter them there."
+                    )
+                self._publish_cam_status("unconfigured", camera_cfg.host, str(exc))
             except Exception as exc:
+                warned_unconfigured = False
                 self.get_logger().warn(f"[flir_ptz] connection failed: {exc} -- retrying")
                 self._publish_cam_status("error", camera_cfg.host, str(exc))
-                self._reconfig_event.clear()
-                try:
-                    await asyncio.wait_for(self._reconfig_event.wait(), timeout=3.0)
-                except asyncio.TimeoutError:
-                    pass
-                if self._reconfig_event.is_set():
-                    return False  # caller re-reads self._camera_cfg and rebuilds
+
+            # Wait for a new configuration, giving up the wait after a few
+            # seconds so a genuine transport failure is retried. When nothing
+            # is configured there is nothing to retry, so wait longer and stay
+            # quiet -- only a new config can change the outcome.
+            timeout = 30.0 if warned_unconfigured else 3.0
+            self._reconfig_event.clear()
+            try:
+                await asyncio.wait_for(self._reconfig_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+            if self._reconfig_event.is_set():
+                return False  # caller re-reads self._camera_cfg and rebuilds
         return False
 
     # -- snapshot publishing (called from the background asyncio thread) ----

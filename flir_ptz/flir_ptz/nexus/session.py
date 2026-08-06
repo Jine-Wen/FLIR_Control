@@ -104,6 +104,16 @@ class SessionError(Exception):
     """Base class for CameraSession-level failures."""
 
 
+class NotConfigured(SessionError):
+    """No camera host has been configured yet.
+
+    Distinct from :class:`LoginError` on purpose: nothing is broken and
+    retrying cannot help. The node should sit waiting for a configuration to
+    arrive (launch argument, environment, or the web setup page) rather than
+    hammering an address that does not exist.
+    """
+
+
 class LoginError(SessionError):
     """Authentication could not be established after all retry attempts."""
 
@@ -230,6 +240,20 @@ class CameraSession:
             await self._connect_locked()
 
     async def _connect_locked(self) -> None:
+        # "No camera configured" is a normal startup state -- the web setup
+        # page exists precisely so it can be filled in at runtime -- not a
+        # transport failure to be retried. Detect it before building a client,
+        # because otherwise the empty base URL reaches httpx and surfaces as
+        # `UnsupportedProtocol: Request URL is missing an 'http://' or
+        # 'https://' protocol` once per login attempt, ten times, two seconds
+        # apart: twenty seconds of noise that names neither the real problem
+        # nor its fix.
+        if not normalize_base_url(self._config.host):
+            raise NotConfigured(
+                "no camera host configured -- pass host:=<ip> to the launch "
+                "file, set FLIR_HOST, or configure it from the web setup page"
+            )
+
         if self._client is not None:
             await self._safe_close(self._client)
         self._client = self._client_factory()
