@@ -125,3 +125,72 @@ def test_never_raises_for_any_combination_of_bad_inputs():
     for wide in [EO_WIDE_FOV_DEG, IR_WIDE_FOV_DEG, 0.0, -1.0]:
         for current in bad_values:
             magnification(wide, current)  # must not raise
+
+
+# ── self-calibration: prefer the camera's own wide-end reading ───────────────
+#
+# The "widest FOV" a magnification is relative to is not really a constant to
+# be configured -- the camera reports its live FOV *and* its zoom percentage,
+# and 0% is the wide end by definition. So the reference can be learned from
+# the hardware on any model, with no measurement or setup step.
+
+from flir_ptz.control.zoom_optics import WideFovCalibrator  # noqa: E402
+
+
+def test_falls_back_to_the_configured_default_before_learning_anything():
+    cal = WideFovCalibrator(63.7)
+    assert cal.wide_fov == 63.7
+    assert cal.source == "default"
+
+
+def test_a_wide_end_reading_becomes_the_reference():
+    cal = WideFovCalibrator(50.0)          # deliberately wrong default
+    cal.observe(fov=63.7, zoom_pctg=0.0)
+    assert cal.wide_fov == 63.7
+    assert cal.source == "camera"
+    assert cal.magnification(2.12) == pytest.approx(30.05, abs=0.01)
+
+
+def test_a_narrow_reading_never_revises_a_learned_reference():
+    """A mid-zoom sample must not quietly redefine the wide end."""
+    cal = WideFovCalibrator(63.7)
+    cal.observe(fov=63.7, zoom_pctg=0.0)
+    cal.observe(fov=8.0, zoom_pctg=90.0)
+    assert cal.wide_fov == 63.7
+    assert cal.source == "camera"
+
+
+def test_running_maximum_is_used_when_the_default_is_too_small():
+    """On a camera whose lens is wider than the configured default, the widest
+    reading seen so far is still a better reference -- it can only ever
+    underestimate the true wide FOV, never overestimate it."""
+    cal = WideFovCalibrator(10.0)
+    cal.observe(fov=18.0, zoom_pctg=42.0)   # never at the wide end
+    assert cal.wide_fov == 18.0
+    assert cal.source == "observed"
+
+
+def test_a_default_larger_than_anything_observed_is_kept():
+    cal = WideFovCalibrator(63.7)
+    cal.observe(fov=40.0, zoom_pctg=30.0)
+    assert cal.wide_fov == 63.7
+    assert cal.source == "default"
+
+
+@pytest.mark.parametrize("bad", [None, 0.0, -1.0])
+def test_rubbish_readings_are_ignored(bad):
+    cal = WideFovCalibrator(63.7)
+    cal.observe(fov=bad, zoom_pctg=0.0)
+    assert cal.wide_fov == 63.7
+    assert cal.source == "default"
+
+
+def test_calibrated_reference_reproduces_the_measured_364c_figures():
+    """End to end against the numbers measured on the real camera."""
+    eo = WideFovCalibrator(1.0)             # default irrelevant once learned
+    eo.observe(fov=63.70, zoom_pctg=0.0)
+    assert eo.magnification(2.12) == pytest.approx(30.05, abs=0.01)
+
+    ir = WideFovCalibrator(1.0)
+    ir.observe(fov=18.00, zoom_pctg=0.0)
+    assert ir.magnification(8.62) == pytest.approx(2.09, abs=0.01)

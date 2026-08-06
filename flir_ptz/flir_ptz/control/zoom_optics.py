@@ -46,3 +46,67 @@ def magnification(wide_fov: float, current_fov: Optional[float]) -> float:
     if current_fov is None or current_fov <= 0 or current_fov > wide_fov or wide_fov <= 0:
         return 1.0
     return wide_fov / current_fov
+
+
+class WideFovCalibrator:
+    """Learns a lens's widest FOV from the camera instead of assuming it.
+
+    The camera reports its live field of view and its zoom position as a
+    percentage, and 0% *is* the wide end by definition. So the reference this
+    module needs is not really a constant to be configured -- it is a reading
+    the camera will hand over the first time the operator zooms out, on any
+    model, with no measurement or setup.
+
+    Until that happens there is nothing to learn from, so the configured
+    default stands in. The running maximum is used in between: it can only
+    ever be an underestimate of the true wide FOV (magnification would read
+    slightly low), never an overestimate, so it is safe to prefer over a
+    default that might belong to a different camera entirely.
+
+    Once a genuine wide-end reading arrives it wins outright and is not
+    revised by anything narrower, which is what stops a mid-zoom sample from
+    quietly redefining the reference.
+    """
+
+    #: A zoom percentage at or below this counts as "fully wide". Not exactly
+    #: zero: the reading is a float from real hardware and lands on values
+    #: like 0.0 or 3.96 depending on where the lens actually stopped.
+    WIDE_PCTG_THRESHOLD = 1.0
+
+    def __init__(self, fallback_deg: float, wide_pctg_threshold: Optional[float] = None) -> None:
+        self._fallback = float(fallback_deg)
+        self._threshold = (
+            self.WIDE_PCTG_THRESHOLD if wide_pctg_threshold is None else float(wide_pctg_threshold)
+        )
+        self._learned: Optional[float] = None
+        self._max_seen: Optional[float] = None
+
+    def observe(self, fov: Optional[float], zoom_pctg: Optional[float]) -> None:
+        """Feed one live reading. Cheap enough to call on every sample."""
+        if fov is None or fov <= 0:
+            return
+        if self._max_seen is None or fov > self._max_seen:
+            self._max_seen = fov
+        if zoom_pctg is not None and zoom_pctg <= self._threshold:
+            self._learned = fov
+
+    @property
+    def wide_fov(self) -> float:
+        if self._learned is not None:
+            return self._learned
+        if self._max_seen is not None and self._max_seen > self._fallback:
+            return self._max_seen
+        return self._fallback
+
+    @property
+    def source(self) -> str:
+        """Where the current reference came from, for logging: the operator
+        should be able to tell a measured value from a fallback."""
+        if self._learned is not None:
+            return "camera"
+        if self._max_seen is not None and self._max_seen > self._fallback:
+            return "observed"
+        return "default"
+
+    def magnification(self, current_fov: Optional[float]) -> float:
+        return magnification(self.wide_fov, current_fov)

@@ -72,7 +72,12 @@ from flir_ptz.control.arbitration import Arbiter
 from flir_ptz.control.config import CameraConfig, ControlConfig, load_camera_config
 from flir_ptz.control.controller import TickController
 from flir_ptz.control.fsm import Intent, Mode, MotionFSM, StepResult
-from flir_ptz.control.zoom_optics import EO_WIDE_FOV_DEG, IR_WIDE_FOV_DEG, magnification
+from flir_ptz.control.zoom_optics import (
+    EO_WIDE_FOV_DEG,
+    IR_WIDE_FOV_DEG,
+    WideFovCalibrator,
+    magnification,
+)
 from flir_ptz.nexus.protocol import DltvSample, IrSample, PtSample
 from flir_ptz.nexus.session import CameraSession, NotConfigured
 from flir_ptz.nexus.token import TokenPolicy
@@ -288,6 +293,15 @@ class FlirPtzNode(Node):
         self._lease_s = float(g("lease_s"))
         self._eo_wide_fov_deg = float(g("eo_wide_fov_deg"))
         self._ir_wide_fov_deg = float(g("ir_wide_fov_deg"))
+        # The camera reports its own FOV and zoom percentage, and 0% IS the
+        # wide end -- so the reference these magnifications are relative to
+        # need not be assumed at all. The parameters above are only a
+        # stand-in until the operator zooms out once, after which the
+        # camera's own reading takes over and the figure is correct on any
+        # model without configuration.
+        self._eo_wide = WideFovCalibrator(self._eo_wide_fov_deg)
+        self._ir_wide = WideFovCalibrator(self._ir_wide_fov_deg)
+        self._wide_ref_logged: dict[str, tuple] = {}
 
         cache_str = str(g("session_cache_path") or "")
         self._session_cache_path: Optional[Path] = Path(cache_str) if cache_str else None
@@ -469,12 +483,18 @@ class FlirPtzNode(Node):
         # own "0 if unknown" convention above) rather than reading as a
         # legitimate "1.0x" (magnification()'s own floor for a bad/zero FOV,
         # which is a different situation: a genuine reading that's degenerate).
-        msg.zoom_mag = magnification(self._eo_wide_fov_deg, zoom.zoom) if zoom is not None else 0.0
+        if zoom is not None:
+            self._eo_wide.observe(zoom.zoom, zoom.zoom_pctg)
+            self._note_wide_source("VIS", self._eo_wide)
+        msg.zoom_mag = self._eo_wide.magnification(zoom.zoom) if zoom is not None else 0.0
 
         ir_zoom = self._ir_zoom_snapshot()
         msg.ir_zoom_pctg = ir_zoom.zoom_pctg if ir_zoom is not None else 0.0
         msg.ir_fov = ir_zoom.fov if ir_zoom is not None else 0.0
-        msg.ir_zoom_mag = magnification(self._ir_wide_fov_deg, ir_zoom.fov) if ir_zoom is not None else 0.0
+        if ir_zoom is not None:
+            self._ir_wide.observe(ir_zoom.fov, ir_zoom.zoom_pctg)
+            self._note_wide_source("eZoom", self._ir_wide)
+        msg.ir_zoom_mag = self._ir_wide.magnification(ir_zoom.fov) if ir_zoom is not None else 0.0
 
         self._publish_best_effort(self._state_pub, msg)
 
@@ -503,6 +523,26 @@ class FlirPtzNode(Node):
             publisher.publish(msg)
         except Exception:
             pass
+
+    def _note_wide_source(self, label: str, cal: "WideFovCalibrator") -> None:
+        """Log when the wide-FOV reference changes, so the operator can see
+        whether a magnification is calibrated against the camera's own
+        wide-end reading or still resting on the configured default.
+
+        Keyed on the VALUE as well as its provenance: the first reading at the
+        wide end may be caught while the lens is still settling, and a later,
+        truly-widest one refines it. Watching only the provenance would report
+        that first approximation and never mention the correction, leaving the
+        log disagreeing with the figure actually in use.
+        """
+        key = (cal.source, round(cal.wide_fov, 2))
+        if self._wide_ref_logged.get(label) == key:
+            return
+        self._wide_ref_logged[label] = key
+        self.get_logger().info(
+            f"[flir_ptz] {label} magnification reference = {cal.wide_fov:.2f} deg "
+            f"({cal.source})"
+        )
 
     def _publish_cam_status(self, status: str, host: str, error: str) -> None:
         msg = String()
