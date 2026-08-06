@@ -43,6 +43,7 @@ ROS is not sourced.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import urllib.request
@@ -52,7 +53,7 @@ from typing import Any, Callable, Optional
 
 from flir_ptz.control.arbitration import allows_command
 from flir_ptz.control.config import ControlConfig
-from flir_ptz.webui.server import ServerConfig, make_server
+from flir_ptz.webui.server import PortInUse, ServerConfig, make_server
 from flir_ptz.webui.sse import SSEHub
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -696,7 +697,15 @@ if _ROS_AVAILABLE:
 
     def main(args: Optional[list] = None) -> None:
         rclpy.init(args=args)
-        node = FlirPtzWebNode()
+        try:
+            node = FlirPtzWebNode()
+        except PortInUse as exc:
+            # Report the one actionable line rather than a traceback through
+            # socketserver internals. Nothing here is a bug to be debugged --
+            # a port is busy, and the message says which and what to do.
+            print(f"\n[flir_ptz_web] {exc.strerror}\n", file=sys.stderr)
+            rclpy.try_shutdown()
+            raise SystemExit(1)
         # MultiThreadedExecutor (not plain rclpy.spin): claim()/unlock()
         # block an HTTP worker thread on a ClaimControl future via a
         # threading.Event -- that future's done-callback only fires once

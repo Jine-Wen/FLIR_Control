@@ -28,6 +28,7 @@ sec. 5):
 
 from __future__ import annotations
 
+import errno
 import json
 import mimetypes
 import os
@@ -40,6 +41,28 @@ from typing import Any, Callable, Optional, Protocol
 from urllib.parse import unquote, urlparse
 
 from flir_ptz.webui.sse import KEEPALIVE_INTERVAL_S, SSEHub, format_keepalive
+
+class PortInUse(OSError):
+    """The web console's port is already bound by something else.
+
+    Its own message is the whole point: the stdlib raises a bare
+    ``OSError: [Errno 98] Address already in use`` from deep inside
+    ``socketserver``, which never mentions which port, which process, or what
+    to do about it.
+    """
+
+    def __init__(self, host: str, port: int) -> None:
+        super().__init__(
+            errno.EADDRINUSE,
+            f"web console port {port} is already in use on {host}.\n"
+            f"  Another instance is probably still running. Check with:\n"
+            f"      ss -tlnp | grep {port}\n"
+            f"  Stop it, or start this one on a different port:\n"
+            f"      ros2 launch flir_ptz flir_ptz.launch.py web_port:=<other>",
+        )
+        self.host = host
+        self.port = port
+
 
 # -- The ROS-side contract ---------------------------------------------------
 #
@@ -571,7 +594,15 @@ def make_server(
         def log_message(self, fmt: str, *args: Any) -> None:  # noqa: N802
             logf(fmt % args)
 
-    server = ThreadingHTTPServer((config.bind_host, config.port), Handler)
+    try:
+        server = ThreadingHTTPServer((config.bind_host, config.port), Handler)
+    except OSError as exc:
+        # A busy port is an ordinary operator mistake -- usually a previous
+        # instance still running -- and deserves a sentence, not a twenty-line
+        # traceback through socketserver internals that never names the port.
+        if exc.errno == errno.EADDRINUSE:
+            raise PortInUse(config.bind_host, config.port) from exc
+        raise
     server.daemon_threads = True
     server._ffplay_manager = ffplay  # type: ignore[attr-defined]  # for shutdown, see below
 

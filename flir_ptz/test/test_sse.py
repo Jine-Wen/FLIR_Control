@@ -823,3 +823,54 @@ def test_symlinked_nested_asset_is_served(tmp_path):
         status, _headers, body = _get(conn, "/app.js")
         assert status == 200
         assert b"symlinked" in body
+
+
+# ── a busy port must be reported, not thrown as a traceback ──────────────────
+#
+# Regression guard. Binding a port already in use raised a bare
+# `OSError: [Errno 98] Address already in use` from inside socketserver, and
+# the launch printed a twenty-line traceback that never said which port, which
+# process, or what to do. A busy port is an ordinary operator mistake -- almost
+# always a previous instance still running.
+
+
+def test_port_in_use_raises_a_named_actionable_error(tmp_path):
+    from flir_ptz.webui.server import PortInUse
+
+    with _RunningServer(tmp_path) as first:
+        cfg = ServerConfig(web_root=first.web_root, bind_host="127.0.0.1", port=first.port)
+        with pytest.raises(PortInUse) as excinfo:
+            make_server(cfg, FakeAdapter(), SSEHub())
+
+    exc = excinfo.value
+    assert exc.port == first.port
+    # The message must name the port and tell the reader what to do.
+    assert str(first.port) in exc.strerror
+    assert "already in use" in exc.strerror
+    assert "web_port" in exc.strerror
+
+
+def test_port_in_use_is_an_oserror_with_the_right_errno(tmp_path):
+    """Callers that only catch OSError must keep working."""
+    import errno as _errno
+    from flir_ptz.webui.server import PortInUse
+
+    with _RunningServer(tmp_path) as first:
+        cfg = ServerConfig(web_root=first.web_root, bind_host="127.0.0.1", port=first.port)
+        try:
+            make_server(cfg, FakeAdapter(), SSEHub())
+        except OSError as exc:
+            assert isinstance(exc, PortInUse)
+            assert exc.errno == _errno.EADDRINUSE
+        else:
+            pytest.fail("expected the bind to fail")
+
+
+def test_other_bind_errors_are_not_swallowed(tmp_path):
+    """Only EADDRINUSE gets the friendly treatment; anything else must
+    propagate unchanged rather than being mislabelled."""
+    cfg = ServerConfig(web_root=_make_web_root(tmp_path), bind_host="192.0.2.1", port=9)
+    with pytest.raises(OSError) as excinfo:
+        make_server(cfg, FakeAdapter(), SSEHub())
+    from flir_ptz.webui.server import PortInUse
+    assert not isinstance(excinfo.value, PortInUse)
