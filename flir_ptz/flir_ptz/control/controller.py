@@ -95,7 +95,7 @@ from flir_ptz.control.fsm import (
     StepResult,
 )
 from flir_ptz.control.profiles import az_error
-from flir_ptz.nexus.protocol import DltvSample, IrSample, PtSample
+from flir_ptz.nexus.protocol import DltvSample, IrSample, NexusError, PtSample
 from flir_ptz.nexus.session import CameraSession, TokenLost
 from flir_ptz.nexus.token import TokenAction, TokenPolicy, TokenTracker
 
@@ -159,6 +159,25 @@ _FRAME_DIVERGENCE_PERSIST_S = 3.0
 # blip must never leave a lens driving to its mechanical limit unattended.
 ZOOM_DEADMAN_S = 1.0
 
+# Renewal vs. new command (fixes the field-observed "Device busy" spam): the
+# browser resends the held direction every ~400ms purely to keep the
+# dead-man deadline above from expiring under a genuinely-held button (see
+# web/app.js's ``ZOOM_RESEND_MS``/``startZoomHold``). The camera itself is a
+# CONTINUOUS mover -- telling it to start zooming "in" while it is already
+# zooming "in" answers RC=11 "Device busy" (measured on a real 364C), which
+# is not a real failure, just the camera saying "I'm already doing that".
+# ``_drain_zoom_channel`` therefore only forwards a pending direction to the
+# camera when it is genuinely new -- the channel was idle, or the requested
+# direction differs from the one already running (see ``_ZoomChannel.
+# direction``) -- and treats a same-direction renewal as "push the deadline
+# forward, touch nothing else". "stop" is exempt from this check and always
+# forwarded, exactly as before. RC=11 is also handled defensively at the
+# camera-call site itself (see ``_apply_zoom_command``) for the rarer case
+# where a genuine command (not a renewal) still lands on an already-moving
+# lens -- e.g. a stale belief after reconnect, or another controller (a
+# physical JCU) already driving it.
+ZOOM_BUSY_RC = 11
+
 # DLTVLastNMEAGet/IRLastNMEAGet share the same single serial CGI channel as
 # PTLastNMEAGet (read every tick already) -- polling either that often while
 # idle would just steal channel slots from pan/tilt for no benefit. Poll on
@@ -183,6 +202,10 @@ class _ZoomChannel:
 
     pending: Optional[str] = None        # drained once per tick
     active: bool = False                  # lens believed moving
+    direction: Optional[str] = None       # "in"/"out" while active, else None --
+    # what makes a same-direction renewal distinguishable from a genuinely
+    # new command (start from idle, or a direction change) -- see the
+    # "Renewal vs. new command" section of the module docstring above.
     deadline: Optional[float] = None      # dead-man expiry
     sample: Optional[Any] = None          # most recent DltvSample/IrSample
     last_poll_at: Optional[float] = None
@@ -614,7 +637,22 @@ class TickController:
         channel.pending = None
 
         if direction is not None:
-            await self._apply_zoom_command(channel, direction, now, zoom_in, zoom_out, zoom_stop, label)
+            if direction != "stop" and channel.active and channel.direction == direction:
+                # A RENEWAL of the direction already running: the browser
+                # resends "in"/"out" every ~400ms purely to keep the
+                # dead-man deadline fed while the button stays held (see
+                # module docstring's "Renewal vs. new command" section).
+                # Push the deadline forward and stop right there -- do NOT
+                # touch the camera. Re-issuing the same continuous-move
+                # command while it is already running is exactly what
+                # earns RC=11 "Device busy" on a real 364C, on a channel
+                # that is a single serial resource.
+                channel.deadline = now + self._zoom_deadman_s
+            else:
+                # Genuinely new: starting from idle, or a direction change
+                # (in -> out) -- always forward to the camera. "stop" is
+                # always forwarded too, unconditionally.
+                await self._apply_zoom_command(channel, direction, now, zoom_in, zoom_out, zoom_stop, label)
         elif channel.active and channel.deadline is not None and now >= channel.deadline:
             # MANDATORY SAFETY: no renewing "in"/"out" arrived in time --
             # a dropped pointerup, a closed tab, a network blip -- stop the
@@ -655,7 +693,25 @@ class TickController:
             # completely unaffected.
             self._log.warn(f"[flir_ptz] {label} zoom {direction!r} failed (token lost): {exc}")
             channel.active = False
+            channel.direction = None
             channel.deadline = None
+            return
+        except NexusError as exc:
+            if exc.code == ZOOM_BUSY_RC:
+                # Benign for zoom specifically: RC=11 "Device busy" means
+                # "already doing what you asked", not a real failure (see
+                # module docstring's "Renewal vs. new command" section) --
+                # log it at debug, never warn, and deliberately leave
+                # channel.active/direction/deadline exactly as they were.
+                # A spurious clear here would disarm the dead-man safety
+                # timer for a lens the camera itself just confirmed is
+                # still moving.
+                self._log.debug(
+                    f"[flir_ptz] {label} zoom {direction!r}: RC=11 device busy "
+                    "(already doing that) -- benign, ignoring"
+                )
+                return
+            self._log.warn(f"[flir_ptz] {label} zoom {direction!r} failed: {exc}")
             return
         except Exception as exc:
             self._log.warn(f"[flir_ptz] {label} zoom {direction!r} failed: {exc}")
@@ -664,9 +720,11 @@ class TickController:
         self._token_tracker.note_command(now)
         if direction == "stop":
             channel.active = False
+            channel.direction = None
             channel.deadline = None
         else:
             channel.active = True
+            channel.direction = direction
             channel.deadline = now + self._zoom_deadman_s
         # Refresh this channel's reading promptly so the UI reflects the
         # change quickly, instead of waiting out the idle poll cadence.

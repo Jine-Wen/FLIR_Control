@@ -72,6 +72,7 @@ from flir_ptz.control.arbitration import Arbiter
 from flir_ptz.control.config import CameraConfig, ControlConfig, load_camera_config
 from flir_ptz.control.controller import TickController
 from flir_ptz.control.fsm import Intent, Mode, MotionFSM, StepResult
+from flir_ptz.control.zoom_optics import EO_WIDE_FOV_DEG, IR_WIDE_FOV_DEG, magnification
 from flir_ptz.nexus.protocol import DltvSample, IrSample, PtSample
 from flir_ptz.nexus.session import CameraSession, NotConfigured
 from flir_ptz.nexus.token import TokenPolicy
@@ -221,6 +222,21 @@ class FlirPtzNode(Node):
         )
         g("lease_s", 60.0)  # control-source arbitration lease duration
         g(
+            "eo_wide_fov_deg", EO_WIDE_FOV_DEG,
+            # Widest (fully zoomed-out) EO/VIS horizontal FOV, degrees --
+            # measured on a real FLIR 364C (see control/zoom_optics.py).
+            # Used to turn the live DLTVLastNMEAGet "Zoom" reading (itself a
+            # FOV in degrees, despite the confusing PtzState.zoom_mm field
+            # name) into PtzState.zoom_mag ("Nx"). A different camera model
+            # (e.g. an M232) will measure a different widest FOV -- override
+            # this parameter for that installation rather than editing code.
+        )
+        g(
+            "ir_wide_fov_deg", IR_WIDE_FOV_DEG,
+            # Same idea as eo_wide_fov_deg, for the IR/thermal lens's
+            # IRLastNMEAGet "FOV" reading -> PtzState.ir_zoom_mag.
+        )
+        g(
             "home_on_shutdown",
             "auto",
             # "auto"   -- park the camera on exit only if the control token is
@@ -270,6 +286,8 @@ class FlirPtzNode(Node):
         self._goto_feedback_frame = str(g("goto_feedback_frame") or "abs")
         self._home_on_shutdown = str(g("home_on_shutdown") or "auto").lower()
         self._lease_s = float(g("lease_s"))
+        self._eo_wide_fov_deg = float(g("eo_wide_fov_deg"))
+        self._ir_wide_fov_deg = float(g("ir_wide_fov_deg"))
 
         cache_str = str(g("session_cache_path") or "")
         self._session_cache_path: Optional[Path] = Path(cache_str) if cache_str else None
@@ -442,10 +460,21 @@ class FlirPtzNode(Node):
         zoom = self._zoom_snapshot()
         msg.zoom_pctg = zoom.zoom_pctg if zoom is not None else 0.0
         msg.zoom_mm = zoom.zoom if zoom is not None else 0.0
+        # msg.zoom_mm (despite its name) carries DLTVLastNMEAGet's "Zoom"
+        # field, which -- measured on a real 364C -- is actually the lens's
+        # current horizontal FOV in degrees, not a focal length. That is
+        # exactly the FOV magnification() needs (see control/zoom_optics.py).
+        # Only fed through magnification() once a live reading actually
+        # exists -- "no reading yet" stays 0.0 (matching zoom_pctg/zoom_mm's
+        # own "0 if unknown" convention above) rather than reading as a
+        # legitimate "1.0x" (magnification()'s own floor for a bad/zero FOV,
+        # which is a different situation: a genuine reading that's degenerate).
+        msg.zoom_mag = magnification(self._eo_wide_fov_deg, zoom.zoom) if zoom is not None else 0.0
 
         ir_zoom = self._ir_zoom_snapshot()
         msg.ir_zoom_pctg = ir_zoom.zoom_pctg if ir_zoom is not None else 0.0
         msg.ir_fov = ir_zoom.fov if ir_zoom is not None else 0.0
+        msg.ir_zoom_mag = magnification(self._ir_wide_fov_deg, ir_zoom.fov) if ir_zoom is not None else 0.0
 
         self._publish_best_effort(self._state_pub, msg)
 

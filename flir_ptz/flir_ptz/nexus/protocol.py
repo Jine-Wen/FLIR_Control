@@ -238,10 +238,13 @@ def parse_nmea(payload: dict) -> PtSample:
 @dataclass(frozen=True)
 class DltvSample:
     """A single parsed DLTVLastNMEAGet sample -- EO (daylight) lens zoom/focus
-    telemetry. Measured on a real FLIR 364C: ``Zoom`` is the lens focal
-    length in mm (e.g. 41.75), ``Zoom_pctg`` is percent of zoom travel (e.g.
-    18.59), ``Focus_pctg`` is percent of focus travel, and ``Autofocus`` is
-    the camera's autofocus state flag."""
+    telemetry. Measured on a real FLIR 364C: despite its name suggesting a
+    focal length in mm, ``Zoom`` is actually the lens's current HORIZONTAL
+    FIELD OF VIEW IN DEGREES (e.g. 41.75 deg between the measured wide 63.70
+    deg and tele 2.12 deg extremes -- see ``control/zoom_optics.py``),
+    ``Zoom_pctg`` is percent of zoom travel (e.g. 18.59), ``Focus_pctg`` is
+    percent of focus travel, and ``Autofocus`` is the camera's autofocus
+    state flag."""
 
     zoom: float
     zoom_pctg: float

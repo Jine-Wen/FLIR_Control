@@ -74,10 +74,18 @@ class ZoomFake:
         self.ir_fov = 11.67
         self.ir_zoom_pctg = 31.25
         self.calls: list[tuple[str, dict]] = []
+        # Actions named here answer RC=11 "Device busy" (measured on a real
+        # 364C for a continuous-move command sent while already moving that
+        # way) instead of their normal RC=0 success -- used to exercise the
+        # controller's benign RC=11 handling without relying on a real race.
+        self.busy_actions: set[str] = set()
 
     def handle_action(self, params: dict) -> dict:
         action = params.get("action", "")
         self.calls.append((action, dict(params)))
+
+        if action in self.busy_actions:
+            return {"error": {"Return Code": 11, "Return String": "Device busy"}}
 
         if action == "SERVERWhoAmI":
             return {action: {"Return Code": 0, "Id": self.session_id, "Owner": "test"}}
@@ -815,6 +823,248 @@ def test_polling_speeds_up_while_zooming_and_slows_back_down_once_idle():
                 f"while idle over an equal window ({idle_count})"
             )
             assert idle_count <= 2, f"idle window polled too often: {idle_count}"
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 -- a renewal must not re-issue the camera command: a same-direction
+# renewal on an already-zooming device only pushes the dead-man deadline
+# forward, never touches the camera. A direction change or "stop" always
+# issues. This is what stops the field-observed
+#   [flir_ptz] EO zoom 'in' failed: DLTVZoomCountsIncrement failed: [11] Device busy
+# spam -- the browser resends the held direction every 400ms purely to keep
+# the dead-man timer fed (see web/app.js's ZOOM_RESEND_MS), and the camera
+# answers RC=11 when told to start a continuous move it is already doing.
+# ---------------------------------------------------------------------------
+
+
+def test_held_renewal_sends_exactly_one_camera_command_however_many_renewals():
+    async def body():
+        cam = ZoomFake()
+        deadman_s = 0.2
+        h = _Harness(cam, zoom_deadman_s=deadman_s)
+        await h.start()
+        try:
+            # Renew well past several dead-man windows' worth of time --
+            # a naive "every renewal re-issues" implementation would send
+            # one DLTVZoomCountsIncrement per renewal here.
+            deadline = time.monotonic() + deadman_s * 6
+            while time.monotonic() < deadline:
+                h.controller.submit_zoom("in")
+                await asyncio.sleep(deadman_s / 5)
+
+            assert cam.zoom_calls == ["in"], (
+                f"a held renewal must reach the camera exactly once, got {cam.zoom_calls}"
+            )
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_ir_held_renewal_sends_exactly_one_camera_command_however_many_renewals():
+    """Same guarantee, IR channel -- independent of the EO test above."""
+
+    async def body():
+        cam = ZoomFake()
+        deadman_s = 0.2
+        h = _Harness(cam, zoom_deadman_s=deadman_s)
+        await h.start()
+        try:
+            deadline = time.monotonic() + deadman_s * 6
+            while time.monotonic() < deadline:
+                h.controller.submit_zoom("out", "ir")
+                await asyncio.sleep(deadman_s / 5)
+
+            assert cam.ir_zoom_calls == ["out"], (
+                f"a held IR renewal must reach the camera exactly once, got {cam.ir_zoom_calls}"
+            )
+            assert cam.zoom_calls == []
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_reversing_direction_mid_hold_issues_the_new_command():
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=5.0)
+        await h.start()
+        try:
+            h.controller.submit_zoom("in")
+            started = await h.wait_until(lambda: cam.zoom_calls == ["in"], timeout=2.0)
+            assert started
+
+            # A couple of same-direction renewals first -- must not issue.
+            h.controller.submit_zoom("in")
+            h.controller.submit_zoom("in")
+            await asyncio.sleep(0.05)
+            assert cam.zoom_calls == ["in"]
+
+            # Now reverse -- this MUST reach the camera.
+            h.controller.submit_zoom("out")
+            reversed_ = await h.wait_until(lambda: cam.zoom_calls == ["in", "out"], timeout=2.0)
+            assert reversed_, f"a direction change must issue, got {cam.zoom_calls}"
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_stop_always_issues_even_immediately_after_a_renewal():
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=5.0)
+        await h.start()
+        try:
+            h.controller.submit_zoom("in")
+            await h.wait_until(lambda: cam.zoom_calls == ["in"], timeout=2.0)
+
+            h.controller.submit_zoom("in")  # renewal -- must not issue
+            await asyncio.sleep(0.05)
+            assert cam.zoom_calls == ["in"]
+
+            h.controller.submit_zoom("stop")
+            stopped = await h.wait_until(lambda: cam.zoom_calls == ["in", "stop"], timeout=2.0)
+            assert stopped, "stop must always issue"
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_starting_from_idle_issues():
+    """Ordinary case, stated explicitly: the very first command for a
+    channel that has never zoomed always reaches the camera."""
+
+    async def body():
+        cam = ZoomFake()
+        h = _Harness(cam, zoom_deadman_s=5.0)
+        await h.start()
+        try:
+            channel = h.controller._eo_zoom
+            assert channel.active is False
+            h.controller.submit_zoom("in")
+            reached = await h.wait_until(lambda: cam.zoom_calls == ["in"], timeout=2.0)
+            assert reached
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_unrenewed_hold_still_stops_but_a_renewed_one_does_not():
+    """The dead-man deadline is still extended by renewals that send
+    nothing: a renewed hold must never be auto-stopped, but an unrenewed one
+    (same deadman window, no further submit_zoom calls at all) still is --
+    proving the deadline itself really is being pushed forward by the
+    no-camera-call renewal path, not just coincidentally never expiring."""
+
+    async def body():
+        cam = ZoomFake()
+        deadman_s = 0.15
+        h = _Harness(cam, zoom_deadman_s=deadman_s)
+        await h.start()
+        try:
+            # -- renewed hold: must not stop --
+            h.controller.submit_zoom("in")
+            await h.wait_until(lambda: cam.zoom_calls == ["in"], timeout=2.0)
+            deadline = time.monotonic() + deadman_s * 5
+            while time.monotonic() < deadline:
+                h.controller.submit_zoom("in")
+                await asyncio.sleep(deadman_s / 4)
+            assert cam.zoom_calls == ["in"], "a renewed hold must never auto-stop"
+
+            # -- now stop renewing: the SAME dead-man timer must still fire --
+            stopped = await h.wait_until(lambda: cam.zoom_calls == ["in", "stop"], timeout=2.0)
+            assert stopped, "an unrenewed hold must still stop on its own"
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 -- RC=11 "Device busy" is benign for zoom: debug-only, never warn,
+# and must never clear the active/dead-man state (a spurious clear would
+# disarm the safety timer for a lens the camera itself confirms is moving).
+# ---------------------------------------------------------------------------
+
+
+def test_rc11_on_a_genuine_first_command_is_debug_only_and_never_warns():
+    """Models a node restart while the lens was left running by a previous
+    session: our local belief starts idle (never zoomed), but the camera
+    answers RC=11 to the very first "in" because it is, in fact, already
+    moving. Must not warn, must not crash, and must not incorrectly claim
+    the local state as active/armed off the back of a failed command."""
+
+    async def body():
+        cam = ZoomFake()
+        cam.busy_actions = {"DLTVZoomCountsIncrement"}
+        h = _Harness(cam, zoom_deadman_s=0.2)
+        await h.start()
+        try:
+            warn_msgs: list[str] = []
+            debug_msgs: list[str] = []
+            h.controller._log.warn = lambda m: warn_msgs.append(m)  # type: ignore[method-assign]
+            h.controller._log.debug = lambda m: debug_msgs.append(m)  # type: ignore[method-assign]
+
+            h.controller.submit_zoom("in")
+            await asyncio.sleep(0.3)
+
+            # The fake only appends to zoom_calls on RC=0 -- every attempt
+            # here came back busy, so it must stay empty.
+            assert cam.zoom_calls == []
+            assert not warn_msgs, f"RC=11 must never warn, got {warn_msgs}"
+            assert any("11" in m for m in debug_msgs), (
+                f"RC=11 must be logged at debug, got {debug_msgs}"
+            )
+        finally:
+            await h.stop()
+
+    run(body())
+
+
+def test_rc11_on_a_direction_reversal_does_not_disarm_the_existing_deadman():
+    """The scenario the "do not let it clear the active/dead-man state"
+    requirement is actually guarding against: EO is genuinely zooming "in"
+    (armed, dead-man deadline set). A direction reversal to "out" is a
+    genuine new command (not a filtered renewal) that happens to land on a
+    camera that answers RC=11. The ORIGINAL "in" hold's active flag,
+    direction, and deadline must all survive untouched."""
+
+    async def body():
+        cam = ZoomFake()
+        cam.busy_actions = {"DLTVZoomCountsDecrement"}
+        deadman_s = 5.0  # deliberately long -- must not fire during this test
+        h = _Harness(cam, zoom_deadman_s=deadman_s)
+        await h.start()
+        try:
+            warn_msgs: list[str] = []
+            h.controller._log.warn = lambda m: warn_msgs.append(m)  # type: ignore[method-assign]
+
+            h.controller.submit_zoom("in")
+            await h.wait_until(lambda: cam.zoom_calls == ["in"], timeout=2.0)
+
+            channel = h.controller._eo_zoom
+            assert channel.active is True
+            assert channel.direction == "in"
+            deadline_before = channel.deadline
+
+            h.controller.submit_zoom("out")
+            await asyncio.sleep(0.2)  # let the tick loop attempt the (busy) reversal
+
+            # "out" never actually landed -- RC=11 every time.
+            assert cam.zoom_calls == ["in"]
+            # And the original hold's state must be completely untouched.
+            assert channel.active is True
+            assert channel.direction == "in"
+            assert channel.deadline == deadline_before
+            assert not warn_msgs, f"RC=11 must never warn, got {warn_msgs}"
         finally:
             await h.stop()
 

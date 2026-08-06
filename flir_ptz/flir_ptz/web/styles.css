@@ -339,7 +339,7 @@ button, input { font: inherit; }
   user-select: none;
 }
 .zoom-readout {
-  min-width: 3.4em;
+  min-width: 4.6em;
   text-align: center;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: .82rem;
@@ -348,6 +348,17 @@ button, input { font: inherit; }
   color: var(--navy-800);
 }
 .zoom-readout .unit { font-size: .64rem; color: var(--muted); margin-left: 1px; }
+/* "VIS" / "eZoom" -- what the operator calls each lens's zoom, distinguishing
+   the two readouts now that neither shows a device-specific unit suffix. */
+.zoom-readout .zoom-label {
+  font-family: system-ui, sans-serif;
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 5px;
+}
 
 /* ── Control sidebar ───────────────────────────────────────────────────── */
 .control-stack {

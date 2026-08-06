@@ -168,8 +168,10 @@ def ptz_state_msg_to_state_dict(msg: Any) -> dict[str, Any]:
         "active_scan_seq": msg.active_scan_seq,
         "zoom_pctg": msg.zoom_pctg,
         "zoom_mm": msg.zoom_mm,
+        "zoom_mag": msg.zoom_mag,
         "ir_zoom_pctg": msg.ir_zoom_pctg,
         "ir_fov": msg.ir_fov,
+        "ir_zoom_mag": msg.ir_zoom_mag,
         "stamp": stamp,
     }
 

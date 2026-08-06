@@ -170,15 +170,13 @@ function fmt(value, dec = 2) {
   return Number.isFinite(value) ? value.toFixed(dec) : "--";
 }
 
-// Zoom percentage: rounded to the nearest whole percent rather than one
-// decimal place. The camera's own reading has enough noise that a
-// stationary lens can report e.g. 31.24 on one poll and 31.26 on the next
-// -- fine at whole-percent resolution, but toFixed(1) turns that same noise
-// into a visible flicker between "31.2" and "31.3". IR is quantised to
-// 6.25% steps anyway, so whole-percent is no loss of real precision there
-// either.
-function fmtPct(value) {
-  return Number.isFinite(value) ? String(Math.round(value)) : "--";
+// Zoom magnification ("12.4x") -- what the operator actually wants, not a
+// percentage of travel. Server sends 0 for "no live reading yet" (see
+// PtzState.zoom_mag/ir_zoom_mag) -- that, like a missing/non-finite value,
+// must render as "--", never "1.0x" (a real, legitimate reading meaning
+// "fully zoomed out") or "NaNx".
+function fmtMag(value) {
+  return Number.isFinite(value) && value > 0 ? value.toFixed(1) + "x" : "--";
 }
 
 /* ── API ────────────────────────────────────────────────────── */
@@ -485,8 +483,8 @@ function renderState(payload) {
   diffStyle(ui.barX, "barX", "width", px);
   diffStyle(ui.barY, "barY", "width", py);
 
-  diffText(ui.eoZoomPctg, "eoZoomPctg", fmtPct(s.zoom_pctg));
-  diffText(ui.irZoomPctg, "irZoomPctg", fmtPct(s.ir_zoom_pctg));
+  diffText(ui.eoZoomPctg, "eoZoomPctg", fmtMag(s.zoom_mag));
+  diffText(ui.irZoomPctg, "irZoomPctg", fmtMag(s.ir_zoom_mag));
 
   applyModel(payload.model, payload.streams);
   applyControlSource(payload.control_source);

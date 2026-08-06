@@ -81,10 +81,12 @@
           <code id="irUrl">—</code>
         </div>
         <!-- IR zoom: continuous like EO, but quantised by the camera to
-             ~6.25% steps. Press-and-hold — see app.js wireZoomControls(). -->
+             ~6.25% steps. Press-and-hold — see app.js wireZoomControls().
+             Readout shows magnification ("eZoom", e.g. "1.4x"), not percent
+             -- see fmtMag() in app.js. -->
         <div class="zoom-controls" id="irZoomControls">
           <button id="irZoomOut" class="secondary" type="button" aria-label="Zoom out">− Zoom</button>
-          <span class="zoom-readout"><span id="irZoomPctg">--</span><span class="unit">%</span></span>
+          <span class="zoom-readout"><span class="zoom-label">eZoom</span><span id="irZoomPctg">--</span></span>
           <button id="irZoomIn" class="secondary" type="button" aria-label="Zoom in">+ Zoom</button>
         </div>
       </article>
@@ -111,10 +113,11 @@
         </div>
         <!-- EO's daylight lens zoom is continuous; IR (see above) has its
              own, independent zoom controls. Press-and-hold — see app.js
-             wireZoomControls(). -->
+             wireZoomControls(). Readout shows magnification ("VIS", e.g.
+             "12.4x"), not percent -- see fmtMag() in app.js. -->
         <div class="zoom-controls" id="eoZoomControls">
           <button id="eoZoomOut" class="secondary" type="button" aria-label="Zoom out">− Zoom</button>
-          <span class="zoom-readout"><span id="eoZoomPctg">--</span><span class="unit">%</span></span>
+          <span class="zoom-readout"><span class="zoom-label">VIS</span><span id="eoZoomPctg">--</span></span>
           <button id="eoZoomIn" class="secondary" type="button" aria-label="Zoom in">+ Zoom</button>
         </div>
       </article>

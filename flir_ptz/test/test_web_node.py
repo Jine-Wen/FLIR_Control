@@ -209,8 +209,10 @@ def _fake_ptz_state(**overrides: Any) -> SimpleNamespace:
         active_scan_seq=0,
         zoom_pctg=18.59,
         zoom_mm=41.75,
+        zoom_mag=1.53,
         ir_zoom_pctg=31.25,
         ir_fov=11.67,
+        ir_zoom_mag=1.54,
     )
     defaults.update(overrides)
     return SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=100, nanosec=250_000_000)), **defaults)
@@ -233,8 +235,10 @@ def test_ptz_state_msg_to_state_dict_matches_api_md_shape():
         "active_scan_seq": 0,
         "zoom_pctg": 18.59,
         "zoom_mm": 41.75,
+        "zoom_mag": 1.53,
         "ir_zoom_pctg": 31.25,
         "ir_fov": 11.67,
+        "ir_zoom_mag": 1.54,
         "stamp": 100.25,
     }
 
