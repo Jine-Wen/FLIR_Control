@@ -3,11 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FLIR PTZ Dashboard</title>
+  <title>CBT SWARM · FLIR PTZ Control</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
+<!-- Camera-disconnected banner (PARITY C13). Shown/hidden by app.js via the
+     `show` class; the text node is rewritten from the camera_status SSE
+     event. Must exist in the markup — app.js resolves both ids once at load. -->
 <div id="camDisconnectWarn" class="cam-disconnect-warn">
   <span id="camDisconnectWarnText">⚠ Camera disconnected.</span>
   <a href="/setup">Re-connect →</a>
@@ -18,8 +21,18 @@
   <!-- ── Topbar ──────────────────────────────────────────────────── -->
   <header class="topbar">
     <div class="topbar-brand">
-      <p class="eyebrow">FLIR Nexus</p>
-      <h1>PTZ Control</h1>
+      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+        <path class="mark-top" d="M50 13 H29 L15 24 L30 35"
+              fill="none" stroke="currentColor" stroke-width="8.5"
+              stroke-linejoin="miter" style="stroke:#FFFFFF"/>
+        <path class="mark-bot" d="M14 51 H35 L49 40 L34 29"
+              fill="none" stroke="currentColor" stroke-width="8.5"
+              stroke-linejoin="miter" style="stroke:#1E72E8"/>
+      </svg>
+      <div class="brand-text">
+        <span class="wordmark">CBT <em>SWARM</em></span>
+        <h1>FLIR PTZ Control</h1>
+      </div>
     </div>
 
     <div class="topbar-status">
@@ -28,17 +41,18 @@
         <span class="status-dot" id="connDot"></span>
         <span class="status-label" id="connectionBadge">No State</span>
       </div>
-      <!-- Active state pills (only visible when active) -->
-      <span id="movingBadge"  class="state-pill">Moving</span>
-      <span id="scanBadge"    class="state-pill">Scanning</span>
+      <!-- Active-state pills — only visible when true -->
+      <span id="movingBadge" class="state-pill">Moving</span>
+      <span id="scanBadge"   class="state-pill">Scanning</span>
       <!-- Control source -->
       <div class="status-item ctrl-src-item">
-        <span class="status-sublabel">CTRL</span>
+        <span class="status-sublabel">Ctrl</span>
         <span class="status-label" id="ctrlBadge">—</span>
       </div>
     </div>
 
     <div class="topbar-right">
+      <a class="topbar-link" href="/setup">Switch Camera</a>
     </div>
   </header>
 
@@ -57,7 +71,7 @@
           </div>
         </div>
         <div class="scope">
-          <video id="irVideo" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;background:#000;"></video>
+          <video id="irVideo" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;background:#0A0F16;"></video>
           <img id="irMjpeg" class="mjpeg-img" alt="IR MJPEG fallback stream" style="display:none;">
           <div class="reticle" id="irReticle"></div>
           <div class="stream-state" id="irState">Not streaming</div>
@@ -79,7 +93,7 @@
           </div>
         </div>
         <div class="scope">
-          <video id="eoVideo" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;background:#000;"></video>
+          <video id="eoVideo" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:contain;background:#0A0F16;"></video>
           <img id="eoMjpeg" class="mjpeg-img" alt="EO MJPEG fallback stream" style="display:none;">
           <div class="reticle" id="eoReticle"></div>
           <div class="stream-state" id="eoState">Not streaming</div>
@@ -99,17 +113,18 @@
       <section class="panel joystick-panel" id="joyPanel">
         <div class="panel-head">
           <div><p class="eyebrow">Track</p><h2>Joystick</h2></div>
-          <output id="joyVector" style="font-size:.75rem;color:var(--muted)">0.00 / 0.00</output>
+          <output id="joyVector" style="font-family:ui-monospace,Menlo,monospace;font-size:.74rem;color:var(--muted)">0.00 / 0.00</output>
         </div>
         <div id="joystick" class="joystick" aria-label="PTZ joystick">
           <div class="axis horizontal"></div>
           <div class="axis vertical"></div>
           <div id="stick" class="stick"></div>
         </div>
+        <p class="joy-hint">Draw one full circle to unlock</p>
         <label class="field">
           <span>Max speed</span>
           <input id="joyGain" type="range" min="1" max="40" value="12">
-          <output id="joyGainValue" style="font-size:.75rem;color:var(--muted)">12 °/s</output>
+          <output id="joyGainValue" style="font-size:.72rem;color:var(--muted)">12 °/s</output>
         </label>
       </section>
 
@@ -165,33 +180,33 @@
   <section class="telemetry">
     <div class="metric geo">
       <span class="label">Geo AZ</span>
-      <span class="value" id="geoAz">--</span><span class="unit">°</span>
+      <span><span class="value" id="geoAz">--</span><span class="unit">°</span></span>
     </div>
     <div class="metric geo">
       <span class="label">Geo EL</span>
-      <span class="value" id="geoEl">--</span><span class="unit">°</span>
+      <span><span class="value" id="geoEl">--</span><span class="unit">°</span></span>
     </div>
     <div class="metric abs">
       <span class="label">Abs AZ</span>
-      <span class="value" id="absAz">--</span><span class="unit">°</span>
+      <span><span class="value" id="absAz">--</span><span class="unit">°</span></span>
     </div>
     <div class="metric abs">
       <span class="label">Abs EL</span>
-      <span class="value" id="absEl">--</span><span class="unit">°</span>
+      <span><span class="value" id="absEl">--</span><span class="unit">°</span></span>
     </div>
     <div class="metric spd">
       <span class="label">Spd AZ</span>
-      <span class="value" id="speedX">--</span><span class="unit">°/s</span>
+      <span><span class="value" id="speedX">--</span><span class="unit">°/s</span></span>
       <div class="spd-bar"><div class="spd-bar-fill" id="barX"></div></div>
     </div>
     <div class="metric spd">
       <span class="label">Spd EL</span>
-      <span class="value" id="speedY">--</span><span class="unit">°/s</span>
+      <span><span class="value" id="speedY">--</span><span class="unit">°/s</span></span>
       <div class="spd-bar"><div class="spd-bar-fill" id="barY"></div></div>
     </div>
     <div class="metric">
       <span class="label">Mode</span>
-      <span class="value" id="modeBadge" style="font-size:.85rem">--</span>
+      <span class="value" id="modeBadge">--</span>
     </div>
   </section>
 
