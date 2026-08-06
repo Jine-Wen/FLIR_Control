@@ -253,3 +253,49 @@ def test_every_panel_setjoylock_touches_is_locked_by_the_same_class():
     for pid in panels:
         assert f'id="{pid}"' in INDEX, f"CTRL_PANELS names #{pid}, absent from the markup"
     assert 'id="joyPanel"' in INDEX
+
+
+# ── the two circle detectors must stay in step ───────────────────────────────
+#
+# The same gesture has to unlock the console whether it is drawn with a mouse
+# (app.js) or a physical stick (control/gestures.py). Nothing but a comment
+# enforced that, and the two were free to drift apart silently.
+
+def _js_number(name: str) -> float:
+    m = re.search(rf"const\s+{name}\s*=\s*([0-9.]+)", APP_JS)
+    assert m, f"app.js no longer defines {name}"
+    return float(m.group(1))
+
+
+def test_circle_thresholds_match_the_python_twin():
+    from flir_ptz.control import gestures
+
+    assert _js_number("CIRCLE_MIN_R") == gestures.CIRCLE_MIN_R
+    assert _js_number("CIRCLE_RESET_R") == gestures.CIRCLE_RESET_R
+
+
+def test_neither_detector_uses_a_sliding_window_or_sample_floor():
+    """The defect both shared: deltas summed over a fixed-size window, plus a
+    minimum sample count. Together they left only a narrow band of drawing
+    speeds that worked -- too fast was rejected outright, too slow could never
+    accumulate a full turn because early samples were discarded faster than new
+    ones arrived."""
+    import inspect
+    from flir_ptz.control import gestures
+
+    py = inspect.getsource(gestures.CircleDetector)
+    assert "_history" not in py, "python detector went back to a sample window"
+    assert "< 20" not in py, "python detector went back to a sample floor"
+
+    js = re.search(r"function detectCircle\([^)]*\)\s*\{.*?\n\}", APP_JS, re.S)
+    assert js, "app.js no longer defines detectCircle"
+    body = js.group(0)
+    assert "_circleHistory" not in body, "js detector went back to a sample window"
+    assert "length < 20" not in body, "js detector went back to a sample floor"
+
+
+def test_panels_cannot_be_squashed_by_the_flex_sidebar():
+    """app.js derives the joystick's drag radius from its rendered width. If a
+    height-constrained flex column shrinks the panel, rendered size stops
+    matching what the stylesheet asked for."""
+    assert "flex-shrink: 0" in _rule_body(".panel")

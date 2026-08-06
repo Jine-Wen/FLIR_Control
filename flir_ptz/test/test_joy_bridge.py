@@ -369,9 +369,13 @@ def test_relock_resets_circle_progress():
     # Get partway through a circle (but not complete).
     for x, y in list(_ring_points(40))[:10]:
         circle.update(x, y)
+    assert circle.progress > 0.0, "precondition: the gesture is partway through"
+
     relock_on_ownership_loss(state, circle)
-    # History should be cleared -- a fresh full circle is required again.
-    assert circle._history == []
+    # Progress must be discarded -- a fresh full circle is required again.
+    # Asserted through the public surface rather than an internal field, so
+    # this survives the detector's implementation changing underneath it.
+    assert circle.progress == 0.0
 
 
 def test_control_source_owner_joy_requires_no_relock():

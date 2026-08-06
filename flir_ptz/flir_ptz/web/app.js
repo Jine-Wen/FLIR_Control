@@ -45,29 +45,63 @@ let joyUnlocked = false;
 let _lastCtrlSrc = null;
 
 /* ── Circle-unlock gesture ──────────────────────────────────────────
-   Must match control/gestures.py::CircleDetector exactly:
-   min_r=0.4, window=120, minimum 20 samples, accumulated unwrapped
-   angle >= 2*pi, reset whenever radius < min_r.
+   Twin of control/gestures.py::CircleDetector — the same gesture must unlock
+   the console whether drawn with a mouse or a physical stick, so keep the two
+   in step.
+
+   Accumulates the unwrapped angle swept, incrementally. The previous version
+   summed deltas across a sliding 120-sample window and refused to report
+   anything before 20 samples, which left only a narrow band of drawing speeds
+   that worked at all: draw it quickly and it was rejected for too few samples;
+   draw it slowly and the earliest deltas fell out of the window faster than
+   new ones arrived, so the total could never reach 2*pi however many turns
+   were made. A careful first attempt lands squarely in that second case.
 */
-const _circleHistory = [];
-const CIRCLE_MIN_R  = 0.4;
-const CIRCLE_WINDOW = 120;
+const CIRCLE_MIN_R   = 0.4;   // below this the angle is too noisy to measure
+const CIRCLE_RESET_R = 0.18;  // below this the stick has genuinely returned to rest
+
+let _circlePrevAngle = null;
+let _circleTotal     = 0;
+
+function circleReset() {
+  _circlePrevAngle = null;
+  _circleTotal     = 0;
+}
+
+/** Fraction of a full turn swept so far, 0..1 — drives the on-screen hint. */
+function circleProgress() {
+  return Math.min(1, Math.abs(_circleTotal) / (2 * Math.PI));
+}
 
 function detectCircle(x, y) {
   const r = Math.hypot(x, y);
-  if (r < CIRCLE_MIN_R) { _circleHistory.length = 0; return false; }
+
+  if (r < CIRCLE_RESET_R) { circleReset(); return false; }
+  // Between reset and min: hold what has been swept but stop measuring, so
+  // brushing past the middle mid-gesture costs nothing.
+  if (r < CIRCLE_MIN_R) { _circlePrevAngle = null; return false; }
+
   const angle = Math.atan2(y, x);
-  _circleHistory.push(angle);
-  if (_circleHistory.length > CIRCLE_WINDOW) _circleHistory.shift();
-  if (_circleHistory.length < 20) return false;
-  let total = 0;
-  for (let i = 1; i < _circleHistory.length; i++) {
-    let d = _circleHistory[i] - _circleHistory[i - 1];
+  if (_circlePrevAngle !== null) {
+    let d = angle - _circlePrevAngle;
     if (d >  Math.PI) d -= 2 * Math.PI;
-    if (d < -Math.PI) d += 2 * Math.PI;
-    total += d;
+    else if (d < -Math.PI) d += 2 * Math.PI;
+    _circleTotal += d;
   }
-  return Math.abs(total) >= 2 * Math.PI;
+  _circlePrevAngle = angle;
+
+  return Math.abs(_circleTotal) >= 2 * Math.PI;
+}
+
+const JOY_HINT_LOCKED = "Draw one full circle to unlock";
+
+/** Show how far round the unlock gesture has got, so a partial sweep is
+ *  visible feedback rather than silence. */
+function updateUnlockHint() {
+  const el = document.querySelector(".joy-hint");
+  if (!el) return;
+  const pct = Math.round(circleProgress() * 100);
+  el.textContent = pct > 0 ? `Keep going… ${pct}%` : JOY_HINT_LOCKED;
 }
 
 function setJoyLock(locked, reason = "self") {
@@ -76,12 +110,17 @@ function setJoyLock(locked, reason = "self") {
   joyEl.classList.remove("lock-self", "lock-remote", "lock-open");
 
   if (locked) {
+    circleReset();
+    const hint = document.querySelector(".joy-hint");
+    if (hint) hint.textContent = JOY_HINT_LOCKED;
     joyEl.classList.add(reason === "remote" ? "lock-remote" : "lock-self");
     CTRL_BUTTONS.forEach(id => { const el = $(id); if (el) el.disabled = true; });
     CTRL_PANELS.forEach(id  => { const el = $(id); if (el) el.classList.add("ctrl-locked"); });
     $("joyPanel").classList.add("ctrl-locked");
   } else {
     joyEl.classList.add("lock-open");
+    const hint = document.querySelector(".joy-hint");
+    if (hint) hint.textContent = "Unlocked — drag to steer";
     CTRL_BUTTONS.forEach(id => { const el = $(id); if (el) el.disabled = false; });
     CTRL_PANELS.forEach(id  => { const el = $(id); if (el) el.classList.remove("ctrl-locked"); });
     $("joyPanel").classList.remove("ctrl-locked");
@@ -497,7 +536,10 @@ function setStick(x, y) {
   const rect   = ui.joy.getBoundingClientRect();
   const radius = rect.width * 0.38;
   ui.stick.style.transform = `translate(${x * radius}px, ${y * radius}px)`;
-  ui.joyVector.textContent = `${x.toFixed(2)} / ${(-y).toFixed(2)}`;
+  // Label the axes explicitly: an unlabelled "0.00 / 0.00" gives no clue
+  // which axis is which when one of them misbehaves.
+  const f = (v) => (v >= 0 ? "+" : "") + v.toFixed(2);
+  ui.joyVector.textContent = `AZ ${f(x)}  EL ${f(-y)}`;
 }
 
 function resetJoystick() {
@@ -524,9 +566,13 @@ function wireJoystick() {
     joy.x = p.x; joy.y = p.y;
     setStick(joy.x, joy.y);
     // Circle detection for unlock
-    if (!joyUnlocked && detectCircle(joy.x, joy.y)) {
-      _circleHistory.length = 0;
-      setJoyLock(false);
+    if (!joyUnlocked) {
+      if (detectCircle(joy.x, joy.y)) {
+        circleReset();
+        setJoyLock(false);
+      } else {
+        updateUnlockHint();
+      }
     }
   });
   ui.joy.addEventListener("pointerup",     resetJoystick);

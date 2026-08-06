@@ -114,27 +114,41 @@ def test_return_to_centre_resets_accumulation():
     assert fired is False
 
 
-def test_reset_method_clears_history_explicitly():
-    d = CircleDetector(min_r=0.4, window=120)
+def test_reset_discards_accumulated_progress():
+    d = CircleDetector(min_r=0.4)
     for x, y in _ring_points(15, r=0.8, clockwise=True):
         d.update(x, y)
+    assert d.progress > 0.0
     d.reset()
-    # After an explicit reset, fewer than 20 subsequent samples cannot
-    # fire regardless of what happened before.
-    fired = False
-    for x, y in _ring_points(10, r=0.8, clockwise=True):
-        fired = d.update(x, y) or fired
-    assert fired is False
+    assert d.progress == 0.0
 
 
-def test_fewer_than_twenty_samples_never_fires_even_if_full_circle():
-    """Needs >= 20 samples: a full circle walked in very few big jumps
-    must not fire even though the angular math alone would sum to 2*pi."""
-    d = CircleDetector(min_r=0.4, window=120)
+
+def test_a_fast_full_circle_fires_even_with_few_samples():
+    """Regression: the detector used to require >= 20 samples before it would
+    report anything, so a quick flick of a genuine full circle was rejected and
+    the operator had to keep going."""
+    d = CircleDetector(min_r=0.4)
     fired = False
-    for x, y in _ring_points(10, r=0.8, clockwise=True):  # only 11 samples
+    for x, y in _ring_points(10, r=0.8, clockwise=True):  # 11 samples
         fired = d.update(x, y) or fired
-    assert fired is False
+    assert fired is True
+
+
+def test_a_slow_full_circle_fires_however_many_samples_it_takes():
+    """The worse half of the same regression. The old detector summed deltas
+    across a 120-sample sliding window, so a circle drawn carefully enough to
+    produce more than 120 samples had its earliest deltas dropped faster than
+    new ones arrived -- the total could never reach 2*pi and the gesture was
+    impossible, no matter how many turns were drawn."""
+    d = CircleDetector(min_r=0.4)
+    fired = False
+    for x, y in _ring_points(400, r=0.8, clockwise=True):
+        fired = d.update(x, y) or fired
+        if fired:
+            break
+    assert fired is True
+
 
 
 def test_exactly_at_threshold_two_pi_fires():
@@ -148,20 +162,36 @@ def test_exactly_at_threshold_two_pi_fires():
     assert fired is True
 
 
-def test_window_caps_history_length():
-    """History never grows past `window` samples."""
-    d = CircleDetector(min_r=0.4, window=120)
-    for i in range(500):
-        angle = i * 0.05
+def test_progress_reports_how_far_round_the_gesture_is():
+    d = CircleDetector(min_r=0.4)
+    for x, y in _ring_points(200, r=0.8, clockwise=True, start=0.0):
+        if d.update(x, y):
+            break
+    assert d.progress == 1.0
+
+    half = CircleDetector(min_r=0.4)
+    for i in range(51):                      # sweep 0 -> pi, i.e. half a turn
+        angle = math.pi * i / 50
+        half.update(0.8 * math.cos(angle), 0.8 * math.sin(angle))
+    assert 0.45 < half.progress < 0.55
+
+
+
+def test_brushing_past_the_centre_does_not_wipe_progress():
+    """Only a genuine return to rest resets. A gesture that dips toward the
+    middle mid-sweep used to lose everything and start over, which is a large
+    part of why unlocking took several attempts."""
+    d = CircleDetector(min_r=0.4)
+    for i in range(30):                      # most of a turn
+        angle = 2 * math.pi * i / 40
         d.update(0.8 * math.cos(angle), 0.8 * math.sin(angle))
-    assert len(d._history) <= 120
+    before = d.progress
+    assert before > 0.5
+
+    d.update(0.25, 0.0)                      # brush past, above reset_r
+    assert d.progress == before, "progress must survive a brief dip inward"
+
+    d.update(0.05, 0.0)                      # genuine return to rest
+    assert d.progress == 0.0
 
 
-def test_radius_exactly_at_min_r_counts_as_inside_not_centred():
-    """r < min_r resets; r == min_r should NOT reset (only strictly
-    below the threshold clears history), matching `if r < self._min_r`."""
-    d = CircleDetector(min_r=0.4, window=120)
-    # x=min_r, y=0 -> r == min_r exactly.
-    result = d.update(0.4, 0.0)
-    assert result is False  # not enough samples yet, but not a reset either
-    assert len(d._history) == 1

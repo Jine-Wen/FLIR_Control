@@ -333,6 +333,10 @@ button, input { font: inherit; }
 }
 
 .panel {
+  /* The sidebar is a height-constrained flex column, so panels would shrink to
+     fit by default -- squashing the joystick, whose drag maths assumes the
+     rendered size matches what CSS asked for. Let the column scroll instead. */
+  flex-shrink: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
